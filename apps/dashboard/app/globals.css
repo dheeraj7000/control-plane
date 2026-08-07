@@ -106,6 +106,16 @@ body {
   color: var(--foreground);
 }
 
-* {
-  border-color: var(--border);
+/* Must be inside @layer base, not a bare rule: unlayered CSS beats
+   *every* @layer'd rule regardless of selector specificity (a plain
+   `* { border-color: ... }` here would silently win over Tailwind
+   v4's utility-layer classes like `border-success`/`border-destructive`
+   — found via a real browser render where a "completed" step's node
+   in the execution DAG rendered with the default gray border instead
+   of the intended green, because this exact rule, unlayered, was
+   overriding it regardless of the more specific class being applied). */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
 }
