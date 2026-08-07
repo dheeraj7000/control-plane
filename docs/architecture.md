@@ -216,13 +216,75 @@ decisions:
   discipline as Milestone 2 not adding REST routes for Execution/
   Workflow.
 
+## Milestone 4 — budget engine and native policy engine
+
+`internal/budget` and `internal/policy` are implemented. Budget was
+folded into this milestone rather than left without a home — the
+original plan named it as a Phase 1 deliverable but never gave it a
+milestone slot, and Policy is specified to reference budget state, so
+Budget had to exist first regardless.
+
+- **The "Agent" gap, made explicit rather than silently worked around**:
+  the spec's Domain Model section names Agent as a core concept ("owns
+  credentials, policies, budgets, allowed tools") but the spec's own
+  repository layout never lists an `internal/agent` package. Rather
+  than invent a new top-level package the spec didn't ask for, or quietly
+  ignore the concept, Budget and Policy both take a plain opaque
+  `OwnerID`/`AgentID` string. This unblocks both packages today without
+  guessing at what a full Agent aggregate (registration, credential
+  storage, tool allowlists as data rather than passed-in config) should
+  look like — that's Milestone 5's job, once Gateway needs agents to
+  actually authenticate. Concretely, `policy.ToolAllowlistRule` takes a
+  `map[string][]string` of agent ID → allowed tools as constructor
+  config today; a real Agent registry would supply that same data
+  later. **This means the spec's Phase 1 success criterion "Register an
+  agent and its permissions" is still not implemented** — tracked
+  explicitly rather than left to be discovered missing at the end.
+- **Budget decides nothing, Policy decides everything**: `budget.Ledger`
+  only tracks and reports (`Usage`, `Limit`, `Exceeded()`); whether an
+  exceeded budget should deny an action is `policy.BudgetRule`'s job.
+  This is the same boundary Milestone 2 drew around `Execution` (owns
+  state, not decisions about that state).
+- **Policy reads budget state through plain values, not a live
+  pointer**: `policy.Input` carries `budget.Limit`/`budget.Usage`/`bool`
+  fields, not a `*budget.Ledger`. A `Rule` could call `Ledger.Charge()`
+  if handed the live aggregate — passing snapshotted values enforces
+  "policy only reads budget" at the type level instead of by convention.
+- **Deny-overrides evaluation, not first-match-wins**: `NativeEngine`
+  evaluates every rule; any explicit deny wins immediately regardless of
+  registration order, an explicit allow wins only if nothing denies, and
+  the configured default effect applies if no rule has an opinion. This
+  is the same model AWS IAM's explicit-deny and Kubernetes admission
+  webhooks use, and it avoids a subtle bug class where an early
+  permissive rule accidentally shadows a later, stricter one.
+- **Four concrete rules ship**: `BudgetRule`, `ToolAllowlistRule`,
+  `AllowedModelsRule`, `TimeWindowRule` — covering budget/agent/tool,
+  provider/model, and time from the spec's named dimensions concretely.
+  Workflow, execution, and environment are already present as
+  `policy.Input` fields (plus an `Extra map[string]any` escape hatch)
+  for a future rule to match on; there's no rule for them yet simply
+  because nothing produces a meaningful policy for them today, not
+  because the engine can't support it. "User role" is explicitly
+  deferred in the spec itself.
+- **The OPA/Cedar swap point is the `Engine` interface**:
+  `policy.Engine` has one method, `Evaluate(ctx, Input) (Decision,
+  error)`. `NativeEngine` is the only implementation today; a
+  Rego/Cedar-backed one is additive later, same pattern as `Store`/`Bus`
+  in Milestone 3 and `Repository` throughout.
+- Same scope discipline as Milestones 2–3: no dependency on
+  `internal/execution` or `internal/events` from either new package
+  (verified: `internal/policy` imports only `internal/budget`;
+  `internal/budget` imports no other `internal/*` package), and no HTTP
+  exposure — a stored, named, enable/disable-able Policy record (the
+  dashboard's "Policies: View, Enable, Disable, Test") is Milestone 5's
+  job, layered on top of the `Rule`/`Engine` primitives built here.
+
 ## Open questions carried over from spec review
 
-Updated after Milestone 3 — #1 is resolved (see above), #3 remains open
-for the distributed case, #4 was resolved in Milestone 2, the rest are
-unchanged and still block the milestones noted:
+Updated after Milestone 4 — #1 and #4 were already resolved, the rest
+are unchanged, and a new one is added:
 
-1. ~~Replay semantics~~ — resolved above.
+1. ~~Replay semantics~~ — resolved in Milestone 3.
 2. **Tool-call idempotency** — retries are a first-class concept
    (`RetryScheduled`); tool invocations need an idempotency key so a
    retried step can't double-execute a side-effecting tool call. Now
@@ -238,3 +300,9 @@ unchanged and still block the milestones noted:
 4. ~~Workflow definition format~~ — resolved in Milestone 2.
 5. **Approval routing** — who approves an `Approval` step and what
    happens on timeout is undefined; needed before Milestone 5.
+6. **Agent identity/registration** — no `internal/agent` package exists;
+   Budget and Policy both work around this with an opaque owner-ID
+   string (see Milestone 4 above). "Register an agent and its
+   permissions" is a named Phase 1 success criterion and is not yet
+   satisfied. Needs a decision on package home (a new `internal/agent`,
+   or fold into `internal/auth`/`internal/gateway`) before Milestone 5.

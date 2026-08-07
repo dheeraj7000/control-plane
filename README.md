@@ -64,12 +64,42 @@ the package-boundary decisions made along the way.
   clean (the in-memory Bus/Store are the first genuinely concurrent
   code in this repo).
 
-No policy engine, budget tracking, or protocol adapters exist yet —
-those are Milestones 4–5. No HTTP/WebSocket routes were added either
-(the spec's `/events` and `/timeline` streaming endpoints are Gateway's
-job, Milestone 5) and nothing yet wires `internal/execution`'s state
-transitions to actually emit events — that wiring belongs to the
-Execution Manager, which doesn't exist until Milestone 5. See
+**Milestone 4 — budget engine and native policy engine**
+
+Budget had no milestone slot in the original plan despite being a named
+Phase 1 deliverable, and Policy is specified to reference budget state
+— so this milestone folds Budget in as Policy's prerequisite.
+
+- `internal/budget`: `Ledger` tracks input/output tokens and cost
+  (integer micro-USD, avoiding float drift) against a `Limit` at three
+  scopes (execution/daily/monthly). Pure tracking only — whether an
+  exceeded budget should deny anything is Policy's decision, not
+  Budget's. `Repository`/`InMemoryRepository` follow the same
+  clone-on-read/write discipline as Milestone 2's repositories.
+- `internal/policy`: the spec's native evaluator behind an `Engine`
+  interface (the named OPA/Cedar swap point). `NativeEngine` combines
+  rules with **deny-overrides** semantics — any explicit deny wins
+  immediately regardless of rule order, matching AWS IAM/Kubernetes
+  admission-webhook conventions. Four concrete rules ship:
+  `BudgetRule`, `ToolAllowlistRule`, `AllowedModelsRule`,
+  `TimeWindowRule`, covering budget/agent/tool/model/time from the
+  spec's named dimensions; workflow/execution/environment are already
+  `Input` fields for a future rule, not yet backed by one.
+- **A gap made explicit, not silently patched**: the spec names "Agent"
+  as a core domain concept but its own repository layout never gives it
+  a package. Budget/Policy both use a plain opaque owner-ID string
+  rather than a fabricated `internal/agent` aggregate — which also
+  means the spec's "Register an agent and its permissions" success
+  criterion is **still not implemented**. See `docs/architecture.md`
+  for the reasoning and what Milestone 5 needs to resolve.
+- 97.8% / 100% unit test coverage; verified `internal/policy` imports
+  only `internal/budget` and `internal/budget` imports no other
+  internal package — the same decoupling discipline as Events/Timeline.
+
+No protocol adapters exist yet — that's Milestone 5, which also needs
+to resolve Agent identity before "register an agent" can actually work,
+and still owes tool-call idempotency and approval routing from earlier
+open questions. See
 [`docs/architecture.md`](docs/architecture.md) for the full milestone
 plan and the open design questions carried into them.
 
