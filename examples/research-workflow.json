@@ -1,0 +1,41 @@
+{
+  "id": "wf-research",
+  "name": "Research and Summarize",
+  "version": 1,
+  "description": "Fetches search results, summarizes them, then routes to a human review step.",
+  "metadata": {
+    "team": "platform",
+    "owner": "dheeraj"
+  },
+  "steps": [
+    {
+      "id": "fetch",
+      "name": "Search the web",
+      "type": "search",
+      "config": {
+        "query": "{{input.topic}}",
+        "max_results": 10
+      }
+    },
+    {
+      "id": "summarize",
+      "name": "Summarize findings",
+      "type": "summarize",
+      "depends_on": ["fetch"],
+      "config": {
+        "model": "gpt-5",
+        "max_tokens": 800
+      }
+    },
+    {
+      "id": "review",
+      "name": "Human review",
+      "type": "approval",
+      "depends_on": ["summarize"],
+      "config": {
+        "assignee_role": "editor",
+        "timeout_seconds": 3600
+      }
+    }
+  ]
+}

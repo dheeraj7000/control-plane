@@ -1,4 +1,4 @@
-# Architecture — Milestone 1 baseline
+# Architecture
 
 ## High-level shape
 
@@ -70,19 +70,109 @@ cheap to change now and expensive after Milestone 5:
   framework, since the non-functional requirement asks for env-var
   config and nothing more sophisticated is needed yet.
 
-## Deferred to later milestones (see each package's `doc.go`)
+## Deferred to later milestones (see each package's doc comment)
 
-Execution/Workflow domain model, state machine, Event envelope, Policy
-evaluator, Budget tracking, Model Router, and all provider adapters are
-scaffolded as empty packages with a documented responsibility and target
-milestone — see `internal/*/doc.go`. This milestone does not implement
-any of them; it proves the process boots, wires real infra clients
-(Postgres/Redis/NATS), and serves health/readiness correctly.
+Gateway, Policy evaluator, Budget tracking, Event envelope/bus, Timeline
+projection, Model Router, and all provider adapters are still empty
+packages with a documented responsibility and target milestone — see
+the package comment at the top of each `internal/*` package's main file.
+Execution and Workflow (below) are no longer in that category.
 
-## Open questions carried over from spec review (not yet resolved)
+## Milestone 2 — core domain model and state machine
 
-These don't block Milestone 1 but should be settled before Milestone 2–3
-land, since they shape the Execution/Event schema:
+`internal/workflow` and `internal/execution` are implemented. Key
+decisions made to unblock this milestone, resolving two of the open
+questions below:
+
+- **Workflow definition format** (was open question #4): canonical
+  in-memory representation is the `Workflow`/`Step` Go structs, with
+  `json` tags for API request/response bodies. YAML is left as a thin
+  conversion layer to add later (unmarshal YAML → JSON → the same
+  struct) rather than a distinct format designed around now — this
+  keeps the REST API (Milestone 5) trivial and doesn't invent a DSL
+  before there's evidence one is needed.
+- **Make illegal states unrepresentable**: `workflow.New` fully
+  validates the step graph (unique IDs, resolvable dependencies, no
+  cycles — detected via Kahn's algorithm) and caches a topological
+  order at construction time. There is no separate `Validate()` a
+  caller can forget to call; a `Workflow` value cannot exist in an
+  invalid state.
+- **Execution aggregate stays narrow**: `Execution` owns exactly
+  lifecycle `State` and per-step `StepRun` progress. Budget ledger
+  entries, policy decisions, and events reference an execution ID from
+  their own owning packages rather than being embedded as fields here —
+  "everything belongs to an execution" is a relationship, not a struct
+  embedding. This avoids guessing at shapes (`internal/budget`,
+  `internal/policy`, `internal/events`) that don't exist yet.
+- **Repository pattern, in-memory today**: both packages define a
+  `Repository` interface plus an `InMemoryRepository`, per the
+  Milestone 1 decision that repository interfaces live next to their
+  domain package and the Postgres implementation is a Milestone 7
+  swap-in. `execution.InMemoryRepository` deliberately returns/stores
+  **clones** (`Execution.Clone()`) rather than shared pointers, so code
+  written against it can't rely on aliasing that won't hold once
+  Milestone 7 swaps in Postgres — `Get()` gives you a snapshot; only
+  `Update()` persists a change. This is the resolution (for the
+  in-memory case) of open question #3 below on write concurrency: it
+  doesn't provide cross-instance concurrency control, but it does
+  enforce the same "read a copy, write explicitly" discipline the real
+  implementation will need, so calling code is already written correctly
+  against it.
+
+### Execution state machine
+
+The spec's own diagram renders the nine states as a single straight
+line (`Retrying -> Completed -> Failed -> Cancelled`), which taken
+literally would mean every execution retries, then completes, then
+fails, then gets cancelled. Read in context it's clearly just an
+enumeration of the state names, not a transition graph. The actual
+graph implemented in `internal/execution/state.go`:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created
+    Created --> Queued
+    Created --> Cancelled
+    Queued --> Running
+    Queued --> Cancelled
+    Running --> Waiting
+    Running --> Paused
+    Running --> Retrying
+    Running --> Completed
+    Running --> Failed
+    Running --> Cancelled
+    Waiting --> Running
+    Waiting --> Failed
+    Waiting --> Cancelled
+    Paused --> Running
+    Paused --> Cancelled
+    Retrying --> Running
+    Retrying --> Failed
+    Retrying --> Cancelled
+    Completed --> [*]
+    Failed --> [*]
+    Cancelled --> [*]
+```
+
+Nothing generates this diagram from the code (or vice versa) — keep
+them in sync by hand if the graph changes; `state.go`'s `transitions`
+map is the authoritative source. `Completed`, `Failed`, and `Cancelled`
+are terminal: `Execution.Transition` rejects any further transition
+once one of those is reached, regardless of target.
+
+Step-level progress (`StepRun.Status`) is intentionally a lighter
+model: pending/running/waiting/completed/failed/skipped with only a
+single rule enforced (a terminal step can't be modified further). It
+does not have its own transition graph, and it does not decide *which*
+step runs next based on the Workflow's dependency graph — that
+ordering/dispatch logic belongs to the Scheduler / Execution Manager
+(Milestone 5+), not to this aggregate.
+
+## Open questions carried over from spec review
+
+Updated after Milestone 2 — #3 remains open for the *distributed* case,
+#4 is resolved (see above), the rest are unchanged and still block the
+milestones noted:
 
 1. **Replay semantics** — does "replay" re-render the stored event
    stream (safe, read-only) or re-execute from a point (which risks
@@ -91,11 +181,12 @@ land, since they shape the Execution/Event schema:
 2. **Tool-call idempotency** — retries are a first-class concept
    (`RetryScheduled`); tool invocations need an idempotency key so a
    retried step can't double-execute a side-effecting tool call.
-3. **Execution-write concurrency** — single-writer-per-execution needs
-   a concrete mechanism (NATS subject keyed by execution ID, or
-   Postgres optimistic locking via a version column) before Milestone 2's
-   state machine is implemented.
-4. **Workflow definition format** — YAML/JSON/code-first is undecided;
-   blocks finishing the Workflow aggregate in Milestone 2.
+3. **Execution-write concurrency, distributed case** — the in-memory
+   repository now enforces copy-on-read/write discipline in-process
+   (see above), but single-writer-per-execution *across server
+   instances* still needs a concrete mechanism (NATS subject keyed by
+   execution ID, or Postgres optimistic locking via a version column)
+   before Milestone 7's Postgres-backed `Repository` is implemented.
+4. ~~Workflow definition format~~ — resolved above.
 5. **Approval routing** — who approves an `Approval` step and what
    happens on timeout is undefined; needed before Milestone 5.
