@@ -100,13 +100,23 @@ var (
 
 // Event is one immutable fact about an Execution. Sequence is left
 // zero until a Store assigns it on Append — see store.go.
+//
+// JSON tags were added in Milestone 6: this struct has been the
+// gateway's `GET .../events` response body since Milestone 5
+// (encoding/json falls back to exported Go field names with no tags
+// present), but nothing decoded that wire shape back into a typed
+// struct until the dashboard needed to. Exporter-style
+// PascalCase field names in a JSON API is inconsistent with every
+// other response body this project ships (see workflow.Step, agentView,
+// executionView, all snake_case) — worth fixing now rather than
+// building a dashboard that hardcodes the accidental casing.
 type Event struct {
-	ID          string
-	ExecutionID string
-	Type        EventType
-	OccurredAt  time.Time
-	Sequence    uint64
-	Data        map[string]any
+	ID          string         `json:"id"`
+	ExecutionID string         `json:"execution_id"`
+	Type        EventType      `json:"type"`
+	OccurredAt  time.Time      `json:"occurred_at"`
+	Sequence    uint64         `json:"sequence"`
+	Data        map[string]any `json:"data,omitempty"`
 }
 
 // New constructs an Event, validating executionID and eventType and

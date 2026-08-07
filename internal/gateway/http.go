@@ -19,7 +19,15 @@ import (
 // internal/auth (control-plane operator authentication, still
 // unbuilt) gating who may register agents at all, not open
 // registration. Everything else requires a valid agent bearer token.
-func Mount(r chi.Router, svc *Service, agents agent.Repository, limiter *RateLimiter) {
+//
+// wsAllowedOrigins is passed straight through to handleEventsWS — see
+// its doc comment for why the WebSocket route needs its own Origin
+// allowlist distinct from the CORS middleware every other route gets.
+// Passing the same value as CORSAllowedOrigins is the expected/only
+// use today, but Mount takes it as an explicit parameter rather than
+// reaching for a package-level config to keep this package's only
+// dependency on configuration explicit at the call site.
+func Mount(r chi.Router, svc *Service, agents agent.Repository, limiter *RateLimiter, wsAllowedOrigins []string) {
 	r.Post("/agents", handleRegisterAgent(svc))
 
 	r.Group(func(r chi.Router) {
@@ -40,7 +48,15 @@ func Mount(r chi.Router, svc *Service, agents agent.Repository, limiter *RateLim
 		r.Get("/executions", handleListExecutions(svc))
 		r.Get("/executions/{id}/timeline", handleGetTimeline(svc))
 		r.Get("/executions/{id}/events", handleGetEvents(svc))
-		r.Get("/executions/{id}/ws", handleEventsWS(svc))
+		r.Get("/executions/{id}/budget", handleGetExecutionBudget(svc))
+	})
+
+	// The WebSocket route gets its own auth middleware (query-param
+	// token fallback) instead of joining the group above — see
+	// AuthMiddlewareWS's doc comment for why.
+	r.Group(func(r chi.Router) {
+		r.Use(AuthMiddlewareWS(agents))
+		r.Get("/executions/{id}/ws", handleEventsWS(svc, wsAllowedOrigins))
 	})
 }
 
@@ -220,6 +236,43 @@ func handleGetEvents(svc *Service) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, evts)
+	}
+}
+
+// budgetView is the wire shape for GET .../executions/{id}/budget —
+// hand-picked the same way executionView/agentView are, rather than
+// exposing budget.Ledger's internals directly.
+type budgetView struct {
+	Scope             string  `json:"scope"`
+	OwnerID           string  `json:"owner_id"`
+	InputTokens       int64   `json:"input_tokens"`
+	OutputTokens      int64   `json:"output_tokens"`
+	CostUSD           float64 `json:"cost_usd"`
+	LimitInputTokens  int64   `json:"limit_input_tokens,omitempty"`
+	LimitOutputTokens int64   `json:"limit_output_tokens,omitempty"`
+	LimitCostUSD      float64 `json:"limit_cost_usd,omitempty"`
+	Exceeded          bool    `json:"exceeded"`
+}
+
+func handleGetExecutionBudget(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ledger, err := svc.GetExecutionBudget(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		usage, limit := ledger.Usage(), ledger.Limit()
+		writeJSON(w, http.StatusOK, budgetView{
+			Scope:             string(ledger.Scope()),
+			OwnerID:           ledger.OwnerID(),
+			InputTokens:       usage.InputTokens,
+			OutputTokens:      usage.OutputTokens,
+			CostUSD:           usage.Cost.USD(),
+			LimitInputTokens:  limit.InputTokens,
+			LimitOutputTokens: limit.OutputTokens,
+			LimitCostUSD:      limit.Cost.USD(),
+			Exceeded:          ledger.Exceeded(),
+		})
 	}
 }
 

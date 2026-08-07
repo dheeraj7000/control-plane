@@ -35,19 +35,23 @@ import (
 	"github.com/dheeraj7000/control-plane/internal/events"
 )
 
-// Entry is one rendered line in a Timeline.
+// Entry is one rendered line in a Timeline. JSON tags added in
+// Milestone 6 for the same reason as events.Event's — this is a
+// dashboard-facing response body (`GET .../timeline`) and should use
+// this project's snake_case convention, not encoding/json's
+// no-tags-present fallback to exported Go field names.
 type Entry struct {
-	EventID     string
-	ExecutionID string
-	Sequence    uint64
-	At          time.Time
+	EventID     string    `json:"event_id"`
+	ExecutionID string    `json:"execution_id"`
+	Sequence    uint64    `json:"sequence"`
+	At          time.Time `json:"at"`
 	// Label is the bold/leading word(s) of the line — "Execution",
 	// "Search", "GitHub", "Budget", "Policy" in the example above.
-	Label string
+	Label string `json:"label"`
 	// Detail is what happened — "Started", "Completed", "+3500
 	// Tokens", "Filesystem Write Denied".
-	Detail string
-	Type   events.EventType
+	Detail string           `json:"detail"`
+	Type   events.EventType `json:"type"`
 }
 
 // Build sorts evts by Sequence and renders each into an Entry. Safe to

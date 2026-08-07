@@ -60,5 +60,19 @@ services:
       nats:
         condition: service_healthy
 
+  dashboard:
+    build:
+      context: .
+      dockerfile: deployments/dashboard.Dockerfile
+      args:
+        # localhost:8080, not http://server:8080 — this URL is called
+        # from the user's browser, not container-to-container, and the
+        # browser can't resolve the compose network's service names.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - server
+
 volumes:
   postgres_data:

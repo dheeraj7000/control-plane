@@ -45,8 +45,12 @@ func newAgentRepoForWS(t *testing.T) agent.Repository {
 }
 
 func newMountedRouter(svc *gateway.Service, agents agent.Repository) chi.Router {
+	return newMountedRouterWithOrigins(svc, agents, []string{"*"})
+}
+
+func newMountedRouterWithOrigins(svc *gateway.Service, agents agent.Repository, wsAllowedOrigins []string) chi.Router {
 	r := chi.NewRouter()
-	gateway.Mount(r, svc, agents, nil)
+	gateway.Mount(r, svc, agents, nil, wsAllowedOrigins)
 	return r
 }
 
@@ -212,6 +216,27 @@ func TestHTTP_ExecutionLifecycle(t *testing.T) {
 	rec = ts.do(t, http.MethodGet, "/executions/"+execID+"/timeline", token, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET .../timeline status = %d, want 200", rec.Code)
+	}
+
+	rec = ts.do(t, http.MethodGet, "/executions/"+execID+"/budget", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET .../budget status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var budgetResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &budgetResp); err != nil {
+		t.Fatalf("decode budget response: %v", err)
+	}
+	if budgetResp["scope"] != "execution" || budgetResp["owner_id"] != execID {
+		t.Errorf("budget response = %v, want scope=execution owner_id=%s", budgetResp, execID)
+	}
+}
+
+func TestHTTP_GetExecutionBudget_UnknownExecutionNotFound(t *testing.T) {
+	ts := newTestServer(t)
+	token := ts.registerAgent(t, "agent-1", "Bot")
+	rec := ts.do(t, http.MethodGet, "/executions/ghost/budget", token, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -54,6 +55,15 @@ type Config struct {
 	// RateLimitPerMinute bounds requests per agent (or per source IP
 	// for unauthenticated calls) via internal/gateway.RateLimiter.
 	RateLimitPerMinute int
+
+	// CORSAllowedOrigins is the set of origins the dashboard (or any
+	// other browser-based client) may call this API from. Defaults to
+	// "*" — permissive by design for local development, since there's
+	// no deployment-specific origin to hardcode yet, but this is
+	// exactly the kind of default a production deployment MUST
+	// override (same posture as Milestone 5's default-allow policy
+	// engine): see docs/architecture.md's open questions.
+	CORSAllowedOrigins []string
 }
 
 // Load reads configuration from the process environment, applying
@@ -73,6 +83,7 @@ func Load() (*Config, error) {
 		OpenAIBaseURL: getEnv("OPENAI_BASE_URL", ""),
 		OpenAIAPIKey:  getEnv("OPENAI_API_KEY", ""),
 	}
+	cfg.CORSAllowedOrigins = splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "*"))
 
 	port, err := getEnvInt("HTTP_PORT", 8080)
 	if err != nil {
@@ -120,6 +131,19 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitCSV splits a comma-separated env value into a trimmed slice,
+// dropping empty elements (so "a, ,b" and "a,b" behave the same).
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) (int, error) {

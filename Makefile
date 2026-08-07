@@ -54,6 +54,14 @@ tidy: ## Sync go.mod/go.sum with imports
 .PHONY: check
 check: fmt vet test ## fmt + vet + test — run before committing
 
+.PHONY: dashboard-dev
+dashboard-dev: ## Run the dashboard's Next.js dev server (expects the API server running separately)
+	cd apps/dashboard && npm install && npm run dev
+
+.PHONY: dashboard-build
+dashboard-build: ## Type-check, lint, and production-build the dashboard
+	cd apps/dashboard && npm install && npm run lint && npm run build
+
 .PHONY: dev-up
 dev-up: ## Start local infra (Postgres, Redis, NATS) via Docker Compose
 	docker compose up -d postgres redis nats --wait

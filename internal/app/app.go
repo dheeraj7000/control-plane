@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
@@ -183,12 +184,28 @@ func (a *App) newRouter() *chi.Mux {
 	r.Use(slogRequestLogger(a.Logger))
 	r.Use(middleware.Recoverer)
 	r.Use(limitRequestBody)
+	// CORS exists solely for Milestone 6's dashboard (a browser app on
+	// its own origin calling this API) — nothing before this milestone
+	// needed it. AllowedOrigins defaults to "*" for local development;
+	// see config.Config.CORSAllowedOrigins's doc comment for why that's
+	// a deliberate, flagged default rather than a real production
+	// posture. Credentials are never sent cross-origin here (the
+	// dashboard sends its bearer token via the Authorization header,
+	// not cookies), so AllowCredentials stays false — which is also
+	// what makes AllowedOrigins: ["*"] safe to default to at all.
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   a.Config.CORSAllowedOrigins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 
 	r.Get("/healthz", a.handleLiveness)
 	r.Get("/readyz", a.handleReadiness)
 
 	limiter := gateway.NewRateLimiter(a.Redis, a.Config.RateLimitPerMinute, time.Minute)
-	gateway.Mount(r, a.Gateway, a.Agents, limiter)
+	gateway.Mount(r, a.Gateway, a.Agents, limiter, a.Config.CORSAllowedOrigins)
 
 	return r
 }

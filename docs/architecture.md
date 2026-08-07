@@ -438,9 +438,115 @@ against Postgres; `internal/app` wires them in as the default.
   accidentally-or-maliciously huge request. Not an exhaustive hardening
   pass — see open questions below for what's still missing.
 
+## Milestone 6 — dashboard
+
+Run after Milestone 7 per that milestone's own reordering rationale — a
+dashboard needs real, persistent data to point at, and now it has some.
+`apps/dashboard` is a Next.js/React/TypeScript app rendering exactly
+what the REST/WebSocket API (Milestones 3–5, persisted since Milestone
+7) already exposes: Overview, Agents, Workflows (+ step-graph detail),
+Executions (+ live detail: step graph, timeline, raw events, budget),
+Settings. See `apps/dashboard/README.md` for the full stack table,
+what's cut and why, and local-dev instructions — this section covers
+only the decisions and backend changes that reach outside that
+directory.
+
+- **Two small, real backend changes were needed, not zero.** A
+  frontend milestone that required no backend change at all would mean
+  the backend was already a complete API for a browser client, which
+  it wasn't:
+  - **CORS.** Nothing before this needed it — every prior milestone's
+    "real HTTP verification" used curl or a Go test, never a browser
+    enforcing same-origin policy. `internal/app` now mounts
+    `github.com/go-chi/cors`, configured via a new
+    `CORS_ALLOWED_ORIGINS` env var (`config.Config.CORSAllowedOrigins`,
+    default `*`) — permissive by default for local development, same
+    posture as the policy engine's default-allow, same posture as the
+    open item that a real deployment must configure a real value.
+  - **`GET .../executions/{id}/budget`.** `events.BudgetUpdated` only
+    carries the delta charged (`DataKeyTokenDelta`), not a running
+    total — rendering "how much of this execution's budget is used"
+    needs the `budget.Ledger` itself, which nothing exposed over HTTP
+    before now. `gateway.Service.GetExecutionBudget` reuses the same
+    `Budgets.GetOrCreate` call `chargeBudget` already makes (seeding a
+    zero-usage ledger for an execution that never charged anything is
+    the right answer for a read, not an error) rather than adding a
+    `Get`-only method to `budget.Repository`.
+- **`events.Event` and `timeline.Entry` gained JSON tags.** Both have
+  been HTTP response bodies since Milestone 5, but neither ever had a
+  test or caller that decoded the JSON back into a typed struct, so
+  nobody had noticed `encoding/json`'s no-tags-present fallback was
+  shipping `PascalCase` field names (`ExecutionID`, `OccurredAt`) —
+  inconsistent with every other response body in this API
+  (`workflow.Step`, `agentView`, `executionView`: all snake_case).
+  Fixed now because the dashboard is the first typed consumer; this is
+  a wire-format change with no Go-level behavior change; no test
+  anywhere asserted the old casing.
+- **The WebSocket route needed its own auth exception.**
+  `AuthMiddleware` (every other route) reads the token from the
+  `Authorization` header only. Browsers cannot set arbitrary headers
+  during a WebSocket handshake, so `GET .../executions/{id}/ws` would
+  have been uncallable from a browser at all under that scheme. Rather
+  than relax the header-only rule for every route, `internal/gateway/
+  auth.go` adds `AuthMiddlewareWS`, mounted only on the WS route: it
+  accepts the header if present, and falls back to a `?token=` query
+  parameter only for this one endpoint. Query parameters can leak into
+  server access logs or a `Referer` header in ways a header doesn't —
+  a real, accepted trade-off for the one route that structurally
+  cannot avoid it, not a general auth-scheme relaxation. Locked in by
+  `TestWS_AcceptsTokenViaQueryParam` and `TestWS_RejectsMissingToken`.
+- **Component library: hand-rolled, not shadcn-CLI-vendored.** The
+  spec names shadcn/ui; the CLI's actual mechanism is generating
+  component source into the repo from a hosted registry. For the
+  handful of primitives this dashboard needs (`Button`, `Card`,
+  `Table`, `Badge`, `Input`, `Select`, plus real `@radix-ui/react-dialog`
+  and `-tabs` underneath `Dialog`/`Tabs` for genuine accessible
+  behavior), hand-rolling against the same design tokens
+  (`--background`, `--card`, `--primary`, ...) gets the same visual
+  language without that indirection. `apps/dashboard/README.md`'s
+  stack table has the full reasoning per package.
+- **Per-step execution status is derived client-side, not added to the
+  API.** `executionView` (Milestone 5) deliberately hand-picks fields
+  rather than exposing `execution.Execution`'s internal `Steps` map.
+  Every status transition the dashboard needs is already a distinct,
+  durably recorded event carrying `step_id`
+  (`StepStarted`/`StepCompleted`/`StepFailed` — see
+  `gateway.Service.runStep`/`failStep`), so `lib/step-status.ts`
+  projects it from `GET .../events` — the same "replay is a pure
+  projection over the event stream" principle `internal/timeline.Build`
+  already relies on, just implemented in TypeScript instead of Go
+  because this projection has no other consumer.
+- **Live updates are poll-plus-invalidate, not a hand-merged event
+  stream.** The dashboard's WebSocket hook (`hooks/use-api.ts`'s
+  `useExecutionSocket`) doesn't append incoming events into the
+  TanStack Query cache; it invalidates the timeline/events/budget/
+  execution queries so they refetch from `GET .../events` — which
+  remains the single source of truth the dashboard reads from. This
+  costs a small amount of redundant network traffic in exchange for
+  never having two different representations of the same event to
+  reconcile. Execution/list views also poll every 2s regardless of the
+  socket, since `events.Bus` (Milestone 3) has no history for a late
+  subscriber and an execution's step-driver runs in a background
+  goroutine with no other push signal.
+- **Cut, deliberately, not silently:** Policies, Tool Registry, and
+  Model Router pages don't exist — there's no admin API yet for any of
+  those (open question #7 below), and a page that can't persist
+  anything would be a mockup, not a feature. Workflow authoring is a
+  JSON textarea (still fully validated server-side via
+  `workflow.Workflow.UnmarshalJSON`), not a visual step builder. The
+  DAG visualization (`@xyflow/react`) uses a simple longest-path
+  layered layout, not a general graph-drawing algorithm.
+- **Verified against the real running stack**, not just `next build`:
+  registered an agent, workflow, and execution through the live Go
+  server via curl, confirmed the dashboard's dev server serves every
+  route at 200 against that same data, and separately confirmed the
+  WebSocket's new query-token auth path with a real client (both a Go
+  test and a standalone Python `websockets` connection against the
+  live server) rather than trusting the unit test alone.
+
 ## Open questions carried over from spec review
 
-Updated after Milestone 7 — the rest are unchanged except where noted:
+Updated after Milestone 6 — the rest are unchanged except where noted:
 
 1. ~~Replay semantics~~ — resolved in Milestone 3.
 2. **Tool-call idempotency** — still unresolved. Adapters make real
@@ -464,11 +570,20 @@ Updated after Milestone 7 — the rest are unchanged except where noted:
    credential lifecycle (rotation, revocation, Vault/KMS) and agent
    registration being unauthenticated remain open — both need
    `internal/auth`, still unbuilt.
-7. **No stored/configurable Policy records** — unchanged; `NativeEngine`
-   still runs with zero rules and default-allow. This is arguably the
-   most consequential remaining gap for anything beyond local
-   development, and the natural next thing to build (a Policy
-   management API is dashboard-adjacent work — Milestone 6 territory).
+7. **No stored/configurable Policy records** — still unchanged, and now
+   without a milestone to attach it to: Milestone 6 built the dashboard
+   against exactly the admin surface that existed (none), rather than
+   inventing a Policy management API to give it something to render
+   (see Milestone 6's "cut, deliberately" note) — a Policies page over
+   state the backend can't persist would have been a mockup. Still
+   arguably the most consequential remaining gap for anything beyond
+   local development; the natural next milestone is building that API
+   and the dashboard page for it together.
 8. **NATS-backed `events.Bus`** — still in-memory only; needed once a
    multi-replica deployment requires cross-instance live event
    delivery. Not needed for anything this codebase does today.
+9. **`CORS_ALLOWED_ORIGINS` defaults to `*`** (Milestone 6) — same
+   posture as the policy engine's default-allow and Milestone 7's 1 MiB
+   body cap: a deliberate, flagged local-development default, not a
+   production-ready one. A real deployment must set this to the actual
+   dashboard origin(s) before exposing this API beyond localhost.

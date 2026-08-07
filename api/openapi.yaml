@@ -4,8 +4,10 @@ info:
   version: 0.1.0-dev
   description: >
     REST surface of the AI Agent Control Plane, as implemented through
-    Milestone 5. Policy/Tool Registry/Model management endpoints from
-    the spec's dashboard section are not yet built (Milestone 6).
+    Milestone 6. Policy/Tool Registry/Model management endpoints from
+    the spec's dashboard section still don't exist — the dashboard
+    built in Milestone 6 only renders what this API already exposes;
+    see docs/architecture.md for what's cut and why.
 servers:
   - url: http://localhost:8080
 security:
@@ -149,15 +151,35 @@ paths:
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       responses:
         "200": { description: Ordered array of timeline entries (Label/Detail/Type/At). }
+  /executions/{id}/budget:
+    get:
+      summary: Execution-scope budget ledger
+      description: >
+        Added in Milestone 6 for the dashboard's execution detail view.
+        events.BudgetUpdated only carries the delta charged, not a
+        running total, so this reads the Ledger directly rather than
+        being derivable from the event stream the way the timeline is.
+      operationId: getExecutionBudget
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Budget" } } } }
+        "404": { description: Not found. }
   /executions/{id}/ws:
     get:
       summary: Live event stream (WebSocket)
       description: >
         Streams events recorded from the moment this connects onward
         only — no replay of history for a late subscriber. Fetch
-        .../events first for full history if needed.
+        .../events first for full history if needed. Unlike every
+        other route, the token may be passed as a `?token=` query
+        parameter instead of the Authorization header — added in
+        Milestone 6 because browsers cannot set arbitrary headers on a
+        WebSocket handshake. See internal/gateway/auth.go's
+        AuthMiddlewareWS.
       operationId: streamExecutionEvents
-      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: token, in: query, required: false, schema: { type: string }, description: "Bearer token, as an alternative to the Authorization header." }
       responses:
         "101": { description: Switching Protocols to WebSocket. }
 
@@ -214,3 +236,15 @@ components:
         state:
           type: string
           enum: [created, queued, running, waiting, paused, retrying, completed, failed, cancelled]
+    Budget:
+      type: object
+      properties:
+        scope: { type: string, enum: [execution, daily, monthly] }
+        owner_id: { type: string }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cost_usd: { type: number }
+        limit_input_tokens: { type: integer }
+        limit_output_tokens: { type: integer }
+        limit_cost_usd: { type: number }
+        exceeded: { type: boolean }

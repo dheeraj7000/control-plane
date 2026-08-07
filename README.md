@@ -174,8 +174,49 @@ on restart.
   still open — deliberately out of scope for "persistence exists and
   is correct for a single writer."
 
-No dashboard exists yet — that's Milestone 6. See
-[`docs/architecture.md`](docs/architecture.md) for the full milestone
+**Milestone 6 — dashboard**
+
+Run after Milestone 7 (a dashboard needs real, persistent data to
+point at). `apps/dashboard` is a Next.js/React/TypeScript app
+rendering exactly what the REST/WebSocket API already exposes:
+Overview, Agents, Workflows (+ step-graph detail via React Flow),
+Executions (+ live detail: step graph with live per-step status,
+timeline, raw events, budget usage), Settings.
+
+- Two small, real backend changes were needed to make this possible:
+  **CORS** (`internal/app` now mounts `go-chi/cors`, configured via
+  `CORS_ALLOWED_ORIGINS`, default `*` for local dev) and a new
+  **`GET .../executions/{id}/budget`** endpoint (nothing exposed a
+  budget ledger's running usage over HTTP before now — `events.
+  BudgetUpdated` only carries the per-charge delta).
+- `events.Event` and `timeline.Entry` gained proper snake_case JSON
+  tags — both had been HTTP response bodies since Milestone 5 with
+  nobody noticing `encoding/json`'s no-tags fallback was shipping
+  `PascalCase` field names, since nothing had decoded them back into a
+  typed struct until the dashboard needed to.
+- The WebSocket route (`GET .../executions/{id}/ws`) now also accepts
+  its bearer token via a `?token=` query parameter — browsers can't
+  set an `Authorization` header during a WebSocket handshake — via a
+  new `AuthMiddlewareWS`, scoped to only that one route rather than
+  relaxing the header-only rule everywhere.
+- Component primitives (`Button`, `Card`, `Table`, `Dialog`, ...) are
+  hand-rolled against shadcn/ui's design tokens rather than
+  CLI-vendored, `@xyflow/react` renders workflow DAGs with a simple
+  longest-path layout, and per-step execution status is derived
+  client-side from the event stream rather than added to the API — see
+  `apps/dashboard/README.md` and `docs/architecture.md` for the full
+  reasoning.
+- **Cut, deliberately**: Policies, Tool Registry, and Model Router
+  pages don't exist — there's no admin API yet for any of those (see
+  open question #7), and a page over state the backend can't persist
+  would be a mockup, not a feature.
+- **Verified against the real running stack**: registered an agent,
+  workflow, and execution through the live Go server via curl,
+  confirmed the dashboard serves every route against that same data,
+  and confirmed the WebSocket's new query-token auth path with both a
+  Go test and a standalone Python client against the live server.
+
+See [`docs/architecture.md`](docs/architecture.md) for the full milestone
 plan and the open design questions carried into them.
 
 ## Repository layout
@@ -183,7 +224,7 @@ plan and the open design questions carried into them.
 ```
 apps/
   server/      REST + WebSocket API process (thin main, wiring lives in internal/app)
-  dashboard/   Next.js dashboard (placeholder — Milestone 6)
+  dashboard/   Next.js dashboard — Milestone 6, see apps/dashboard/README.md
   cli/         operator CLI (placeholder)
 internal/      domain packages — see each package's doc comment for its responsibility
 pkg/           dependency-free code safe to reuse outside this module
@@ -222,9 +263,12 @@ make docker-up
 | `make check`            | fmt + vet + test — run before committing       |
 | `make lint`             | golangci-lint (auto-installs to `./bin`)       |
 | `make dev-up`           | Start local infra only                         |
-| `make docker-up`        | Build and run the full stack in containers     |
+| `make docker-up`        | Build and run the full stack in containers (server + dashboard) |
+| `make dashboard-dev`    | Run the dashboard's Next.js dev server         |
+| `make dashboard-build`  | Lint, type-check, and production-build the dashboard |
 
 ## Requirements
 
 - Go 1.25+ (developed against 1.26)
+- Node.js 20+ (for `apps/dashboard`)
 - Docker + Docker Compose v2

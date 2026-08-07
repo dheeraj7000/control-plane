@@ -1,0 +1,11 @@
+# Keeps the Docker build context small — without this, building any
+# image with `context: .` (see docker-compose.yml) sends the entire
+# repo, including apps/dashboard/node_modules (hundreds of MB), to the
+# daemon on every build. Discovered while building
+# deployments/dashboard.Dockerfile for the first time: the build
+# context transfer alone took longer than the actual build.
+.git/
+bin/
+apps/dashboard/node_modules/
+apps/dashboard/.next/
+apps/dashboard/out/

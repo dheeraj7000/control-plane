@@ -199,6 +199,26 @@ func (s *Service) SubscribeEvents(ctx context.Context, executionID string) (<-ch
 	return s.cfg.Events.Bus().Subscribe(ctx, events.Filter{ExecutionID: executionID})
 }
 
+// GetExecutionBudget returns executionID's execution-scope budget
+// Ledger — added in Milestone 6 for the dashboard's execution detail
+// view. events.BudgetUpdated only carries the *delta* charged
+// (DataKeyTokenDelta), not a running total, so rendering "how much of
+// this execution's budget has been used" needs the Ledger itself, not
+// a projection over the event stream the way GetTimeline works.
+//
+// Reuses the same GetOrCreate call chargeBudget already makes rather
+// than adding a Budgets.Get-only path to the Repository interface:
+// GetOrCreate seeding a fresh, zero-usage Ledger for an execution that
+// exists but never charged anything (e.g. it failed before any
+// model-call step ran) is the correct answer for this read, not an
+// error.
+func (s *Service) GetExecutionBudget(ctx context.Context, executionID string) (*budget.Ledger, error) {
+	if _, err := s.cfg.Executions.Get(ctx, executionID); err != nil {
+		return nil, err
+	}
+	return s.cfg.Budgets.GetOrCreate(ctx, budget.ScopeExecution, executionID, "", s.cfg.DefaultExecutionBudget)
+}
+
 // run drives exec's steps to completion. It is intentionally
 // synchronous and sequential — TopologicalOrder() one step at a time,
 // stopping at the first failure — not the concurrent,
