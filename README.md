@@ -42,9 +42,34 @@ the package-boundary decisions made along the way.
   7 swaps in Postgres, not just a test double.
 - 90%+ unit test coverage on both packages.
 
-No event bus, policy engine, budget tracking, or protocol adapters
-exist yet — those are Milestones 3–5. No HTTP routes expose Execution/
-Workflow yet either; that's Milestone 5's job. See
+**Milestone 3 — event bus and timeline engine**
+
+- `internal/events`: the `Event` envelope (18 event types from the
+  spec's named chain) plus two interfaces — `Store` (durable,
+  replayable log; source of truth) and `Bus` (best-effort live pub/sub
+  fan-out) — matching the Milestone 1 decision that NATS is fan-out and
+  Postgres is durable. `InMemoryStore`/`InMemoryBus` are the real
+  implementations used until later milestones swap in NATS/Postgres.
+  `Recorder` ties the two together for producers.
+- `internal/timeline`: a pure projection from an ordered event stream
+  to human-readable `Entry` values (e.g. `Budget +3500 Tokens`,
+  `Policy Filesystem Write Denied`, matching the spec's example). No
+  dependency on `internal/execution` or `internal/workflow` — labels
+  come from the event's own payload.
+- This *is* "replay the execution timeline" in its safe, read-only
+  sense: `timeline.Build` is deterministic over `Store.List`'s output.
+  Re-executing side-effecting steps is a different, still out-of-scope
+  capability — see `docs/architecture.md`.
+- 97%+ / 98%+ unit test coverage on the two new packages, race-detector
+  clean (the in-memory Bus/Store are the first genuinely concurrent
+  code in this repo).
+
+No policy engine, budget tracking, or protocol adapters exist yet —
+those are Milestones 4–5. No HTTP/WebSocket routes were added either
+(the spec's `/events` and `/timeline` streaming endpoints are Gateway's
+job, Milestone 5) and nothing yet wires `internal/execution`'s state
+transitions to actually emit events — that wiring belongs to the
+Execution Manager, which doesn't exist until Milestone 5. See
 [`docs/architecture.md`](docs/architecture.md) for the full milestone
 plan and the open design questions carried into them.
 

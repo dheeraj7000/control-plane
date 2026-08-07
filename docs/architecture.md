@@ -168,25 +168,73 @@ step runs next based on the Workflow's dependency graph — that
 ordering/dispatch logic belongs to the Scheduler / Execution Manager
 (Milestone 5+), not to this aggregate.
 
+## Milestone 3 — event bus and timeline engine
+
+`internal/events` and `internal/timeline` are implemented. Key
+decisions:
+
+- **Store vs. Bus, as code**: this is the Milestone 1 architectural
+  call (NATS = fan-out, Postgres = source of truth) made concrete.
+  `events.Store` is the durable, replayable log (`InMemoryStore` today,
+  Postgres in Milestone 7); `events.Bus` is best-effort live fan-out
+  (`InMemoryBus` today — single-process pub/sub over channels, a slow
+  subscriber gets dropped events rather than blocking the publisher). A
+  NATS-backed `Bus` is deferred until something actually needs
+  cross-instance delivery (multiple server replicas serving WebSocket
+  subscribers) — the interface doesn't change either way.
+- **`Recorder` ties them together**: producers (the not-yet-built
+  Execution Manager, Policy Engine, Budget Engine) will depend on
+  `events.Recorder.Record`, not wire `Store`+`Bus` separately. It
+  appends first (durable), then publishes the exact stored copy —
+  Sequence included — so a live subscriber and a later replay agree on
+  ordering for the same event.
+- **Sequence, not wall-clock time, defines order**: `Store.Append`
+  assigns a `Sequence` monotonically per `ExecutionID`. Timestamps can
+  collide or skew across processes; `timeline.Sort`/`Build` order by
+  `Sequence`, never by `OccurredAt`.
+- **Timeline stays decoupled from Execution/Workflow**: `internal/
+  timeline` only imports `internal/events`. Human-readable labels (step
+  name, tool name, policy name) travel in the event's own `Data`
+  payload via well-known keys (`events.DataKeyStepName` etc.) rather
+  than the timeline renderer reaching into a `Workflow` to look one up.
+  This keeps rendering pure and trivially testable, at the cost of
+  requiring producers to remember to populate those keys — worth
+  revisiting if that turns out to be a common mistake once producers
+  exist.
+- **Replay semantics — resolved** (was open question #1): `timeline.
+  Build` is a pure function over `events.Store.List`'s output, so
+  calling it again on the same stored events reproduces an identical
+  timeline. That *is* this milestone's implementation of "replay the
+  execution timeline" — the safe, read-only sense. Re-executing a
+  completed execution's side-effecting steps from some point (the
+  other reading of "replay") is a different capability, is not what
+  this implements, and remains explicitly out of scope until a later
+  milestone deliberately designs for it (with the idempotency
+  safeguards open question #2 below still describes).
+- No HTTP/WebSocket exposure was added — `/events` and `/timeline`
+  streaming endpoints are Gateway's job (Milestone 5), same scope
+  discipline as Milestone 2 not adding REST routes for Execution/
+  Workflow.
+
 ## Open questions carried over from spec review
 
-Updated after Milestone 2 — #3 remains open for the *distributed* case,
-#4 is resolved (see above), the rest are unchanged and still block the
-milestones noted:
+Updated after Milestone 3 — #1 is resolved (see above), #3 remains open
+for the distributed case, #4 was resolved in Milestone 2, the rest are
+unchanged and still block the milestones noted:
 
-1. **Replay semantics** — does "replay" re-render the stored event
-   stream (safe, read-only) or re-execute from a point (which risks
-   double side-effects on external tools)? Needs an explicit answer
-   before the Timeline Engine (Milestone 3) API is finalized.
+1. ~~Replay semantics~~ — resolved above.
 2. **Tool-call idempotency** — retries are a first-class concept
    (`RetryScheduled`); tool invocations need an idempotency key so a
-   retried step can't double-execute a side-effecting tool call.
+   retried step can't double-execute a side-effecting tool call. Now
+   that `events.RetryScheduled` exists, this is the natural place to
+   carry that key once it's designed (Milestone 5, when adapters
+   actually make tool calls).
 3. **Execution-write concurrency, distributed case** — the in-memory
-   repository now enforces copy-on-read/write discipline in-process
-   (see above), but single-writer-per-execution *across server
+   repository enforces copy-on-read/write discipline in-process (see
+   Milestone 2 above), but single-writer-per-execution *across server
    instances* still needs a concrete mechanism (NATS subject keyed by
    execution ID, or Postgres optimistic locking via a version column)
    before Milestone 7's Postgres-backed `Repository` is implemented.
-4. ~~Workflow definition format~~ — resolved above.
+4. ~~Workflow definition format~~ — resolved in Milestone 2.
 5. **Approval routing** — who approves an `Approval` step and what
    happens on timeout is undefined; needed before Milestone 5.
