@@ -279,18 +279,100 @@ Budget had to exist first regardless.
   dashboard's "Policies: View, Enable, Disable, Test") is Milestone 5's
   job, layered on top of the `Rule`/`Engine` primitives built here.
 
+## Milestone 5 — Gateway and protocol adapters
+
+`internal/agent`, `internal/adapters` (+ `mcp`, `openai` subpackages),
+and `internal/gateway` are implemented. This is the milestone where
+every previously-isolated package finally gets composed — Workflow,
+Execution, Events, Policy, Budget, and the new Adapters all get wired
+together by `gateway.Service`, and the server gets its first real HTTP
+surface.
+
+- **Agent gets its package, resolving open question #6**: `internal/agent`
+  is a new top-level package (not folded into `internal/auth` or
+  `internal/gateway`) — the same reasoning that gave Workflow and
+  Execution their own packages despite being referenced elsewhere.
+  `internal/auth` remains reserved for control-plane-*operator*
+  authN/authZ, a different concern from Agent-as-workload-identity.
+  Only a salted hash of an issued bearer token is ever stored; the
+  plaintext is returned exactly once, at registration.
+- **`gateway.Service` is the spec's "Execution Manager"**: it's the
+  first thing in this codebase allowed to import and compose
+  `execution`, `workflow`, `events`, `policy`, `budget`, and `adapters`
+  together — every one of those packages was kept deliberately
+  ignorant of the others across Milestones 2-4 specifically so this
+  composition would be possible without touching any of them. Its
+  `run`/`runStep` driver is intentionally synchronous and sequential
+  (`Workflow.TopologicalOrder()`, one step at a time, stop-on-first-
+  failure) rather than the concurrent, backoff-and-retry-aware dispatch
+  a real Scheduler would do — this proves the full wiring end-to-end;
+  making it concurrent/resilient is additive future work, not a
+  rewrite.
+- **Adapters split by shape, not spec's list**: `adapters.Adapter`
+  (tool calls) and `adapters.ModelAdapter` (model/chat calls) are two
+  interfaces, not one — MCP is fundamentally about tool/resource
+  invocation, OpenAI about chat completions, and forcing both into one
+  interface would mean awkward unused fields either way.
+- **MCP adapter is a real (if intentionally minimal) client**: it
+  speaks actual JSON-RPC 2.0 over MCP's Streamable HTTP transport for
+  `tools/call`, tested against an `httptest` server that speaks the
+  same subset. What's missing relative to the full spec — initialize
+  handshake, capability negotiation, `tools/list` discovery, SSE
+  streaming, sessions — is a deliberate scope cut documented in the
+  package itself, not a hidden gap.
+- **OpenAI adapter makes real HTTP calls** to the Chat Completions
+  endpoint (`net/http` directly, no SDK dependency) — single-turn,
+  non-streaming, no function-calling. Tested against `httptest`, never
+  the live API.
+- **Policy reconciles a spec inconsistency**: the spec's one worked
+  event-chain example says the event after `PolicyEvaluated` is
+  `ToolApproved`, but its general event list says `PolicyApproved`.
+  Milestone 3 had already standardized on `PolicyApproved`/
+  `PolicyDenied` (they apply to model-call steps too, not just tool
+  calls) — `gateway.Service` uses that pair, documented at the call
+  site so the discrepancy isn't a silent surprise later.
+- **No admin API for policy rules yet**: `internal/app` wires a
+  `NativeEngine` with zero rules and `EffectAllow` as the default —
+  the only honest choice until there's a way to configure real ones.
+  Flagged explicitly (including in a code comment at the wiring site):
+  a real deployment MUST configure real rules before this default
+  matters. Building the stored, named, enable/disable-able Policy
+  records the dashboard needs (Milestone 6) is what closes this gap.
+- **Rate limiting**: Redis-backed fixed-window (`INCR`+`EXPIRE`),
+  keyed by authenticated agent ID or source IP. Fails open on a Redis
+  error — an unreachable limiter should degrade to unlimited, not take
+  the API down; `/readyz` is where a Redis outage is supposed to
+  surface, not request-time 500s.
+- **WebSocket streaming has no history for late subscribers**: `GET
+  .../executions/{id}/ws` streams live events from `events.Bus` only —
+  Bus was deliberately built with no replay capability in Milestone 3.
+  A client that needs full history should `GET .../events` first, then
+  open the socket for what happens next; merging the two into one
+  gapless stream is a real problem, left unsolved rather than partially
+  solved here.
+- **Agent registration is unauthenticated** — bootstrapping the very
+  first agent would otherwise be circular, and there's no
+  control-plane-operator auth (`internal/auth`) yet to gate it with.
+  This is a known, flagged security gap for any deployment beyond local
+  development, not an oversight.
+- **Verified against a real running server**, not just unit tests:
+  registered an agent, registered a workflow, started an execution, and
+  watched it reach `completed` with the exact event chain from the
+  spec's own example (`Execution Created → Started → StepStarted →
+  PolicyEvaluated → PolicyApproved → StepCompleted → Execution
+  Completed`) — over real HTTP, against real Postgres/Redis/NATS.
+
 ## Open questions carried over from spec review
 
-Updated after Milestone 4 — #1 and #4 were already resolved, the rest
-are unchanged, and a new one is added:
+Updated after Milestone 5 — #6 is resolved (see above), #2 is narrowed,
+the rest are unchanged:
 
 1. ~~Replay semantics~~ — resolved in Milestone 3.
-2. **Tool-call idempotency** — retries are a first-class concept
-   (`RetryScheduled`); tool invocations need an idempotency key so a
-   retried step can't double-execute a side-effecting tool call. Now
-   that `events.RetryScheduled` exists, this is the natural place to
-   carry that key once it's designed (Milestone 5, when adapters
-   actually make tool calls).
+2. **Tool-call idempotency** — still unresolved. `events.RetryScheduled`
+   exists and adapters now make real calls (Milestone 5), so this is no
+   longer blocked on anything else existing — it's just not designed
+   yet. A retried step can still double-execute a side-effecting tool
+   call today.
 3. **Execution-write concurrency, distributed case** — the in-memory
    repository enforces copy-on-read/write discipline in-process (see
    Milestone 2 above), but single-writer-per-execution *across server
@@ -299,10 +381,16 @@ are unchanged, and a new one is added:
    before Milestone 7's Postgres-backed `Repository` is implemented.
 4. ~~Workflow definition format~~ — resolved in Milestone 2.
 5. **Approval routing** — who approves an `Approval` step and what
-   happens on timeout is undefined; needed before Milestone 5.
-6. **Agent identity/registration** — no `internal/agent` package exists;
-   Budget and Policy both work around this with an opaque owner-ID
-   string (see Milestone 4 above). "Register an agent and its
-   permissions" is a named Phase 1 success criterion and is not yet
-   satisfied. Needs a decision on package home (a new `internal/agent`,
-   or fold into `internal/auth`/`internal/gateway`) before Milestone 5.
+   happens on timeout is still undefined. `StepTypeApproval` currently
+   falls through `gateway.Service.runStep`'s no-adapter-yet default
+   case (completes immediately as a no-op) — functionally fine for
+   demoing wiring, but not a real approval flow.
+6. ~~Agent identity/registration~~ — resolved in Milestone 5
+   (`internal/agent`). Full credential lifecycle (rotation, revocation,
+   a real secrets-manager/Vault/KMS integration) remains open, and
+   agent registration being unauthenticated (see above) needs
+   `internal/auth` before production use.
+7. **No stored/configurable Policy records** — `NativeEngine` is wired
+   with zero rules today; there's no API/dashboard path to add real
+   ones yet. Needed before the default-allow posture is anything but a
+   placeholder.

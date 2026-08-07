@@ -25,8 +25,17 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/dheeraj7000/control-plane/internal/adapters/mcp"
+	"github.com/dheeraj7000/control-plane/internal/adapters/openai"
+	"github.com/dheeraj7000/control-plane/internal/agent"
+	"github.com/dheeraj7000/control-plane/internal/budget"
 	"github.com/dheeraj7000/control-plane/internal/config"
+	"github.com/dheeraj7000/control-plane/internal/events"
+	"github.com/dheeraj7000/control-plane/internal/execution"
+	"github.com/dheeraj7000/control-plane/internal/gateway"
+	"github.com/dheeraj7000/control-plane/internal/policy"
 	"github.com/dheeraj7000/control-plane/internal/telemetry"
+	"github.com/dheeraj7000/control-plane/internal/workflow"
 	pkgserver "github.com/dheeraj7000/control-plane/pkg/server"
 )
 
@@ -38,9 +47,22 @@ type App struct {
 	Logger    *slog.Logger
 	Telemetry *telemetry.Provider
 
-	DB    *pgxpool.Pool // lazy-connecting; real usage starts in Milestone 2/7
+	DB    *pgxpool.Pool // lazy-connecting; real usage starts in Milestone 7
 	Redis *redis.Client // lazy-connecting
 	NATS  *nats.Conn    // best-effort eager connect, see connectNATS
+
+	// Domain repositories. All in-memory today (see each package's
+	// InMemoryRepository) — Milestone 7 swaps DB/Redis-backed
+	// implementations in here without touching callers.
+	Workflows  workflow.Repository
+	Executions execution.Repository
+	Agents     agent.Repository
+	Budgets    budget.Repository
+	Events     *events.Recorder
+
+	// Gateway is the orchestrator (Milestone 5's "Execution Manager")
+	// composing everything above with Policy and the protocol adapters.
+	Gateway *gateway.Service
 
 	Router     *chi.Mux
 	httpServer *http.Server
@@ -72,13 +94,47 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	natsConn := connectNATS(cfg.NATSURL, logger)
 
 	a := &App{
-		Config:    cfg,
-		Logger:    logger,
-		Telemetry: tp,
-		DB:        dbPool,
-		Redis:     redisClient,
-		NATS:      natsConn,
+		Config:     cfg,
+		Logger:     logger,
+		Telemetry:  tp,
+		DB:         dbPool,
+		Redis:      redisClient,
+		NATS:       natsConn,
+		Workflows:  workflow.NewInMemoryRepository(),
+		Executions: execution.NewInMemoryRepository(),
+		Agents:     agent.NewInMemoryRepository(),
+		Budgets:    budget.NewInMemoryRepository(),
+		Events:     events.NewRecorder(events.NewInMemoryStore(), events.NewInMemoryBus()),
 	}
+
+	// No stored/toggleable policy rules exist yet (that's Milestone
+	// 5+'s dashboard-managed Policy records, layered on the Rule/Engine
+	// primitives Milestone 4 built) — default-allow with zero rules is
+	// the only honest choice until there's a way to configure real
+	// ones. Flagged here rather than silently shipping a permissive
+	// posture: a production deployment MUST configure real rules
+	// before this default matters.
+	policyEngine, err := policy.NewNativeEngine(policy.EffectAllow)
+	if err != nil {
+		return nil, fmt.Errorf("app: init policy engine: %w", err)
+	}
+
+	gatewaySvc, err := gateway.NewService(gateway.ServiceConfig{
+		Workflows:    a.Workflows,
+		Executions:   a.Executions,
+		Agents:       a.Agents,
+		Budgets:      a.Budgets,
+		Events:       a.Events,
+		PolicyEngine: policyEngine,
+		ToolAdapter:  mcp.New(cfg.MCPEndpoint, nil),
+		ModelAdapter: openai.New(cfg.OpenAIBaseURL, cfg.OpenAIAPIKey, nil),
+		Logger:       logger,
+		Environment:  cfg.Env,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("app: init gateway service: %w", err)
+	}
+	a.Gateway = gatewaySvc
 
 	a.Router = a.newRouter()
 	a.httpServer = &http.Server{
@@ -90,24 +146,27 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 	return a, nil
 }
 
-// newRouter builds the chi mux and mounts routes owned directly by the
-// composition root (health/readiness). Domain routes are mounted by
-// their owning package starting in Milestone 5 (Gateway); until then
-// this is intentionally the only route group.
+// newRouter builds the chi mux: health/readiness (owned directly by
+// the composition root) plus every internal/gateway route, mounted
+// here rather than gateway calling back into app — the composition
+// root is the only place that should know about route wiring.
 func (a *App) newRouter() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	// NOTE: chi's middleware.RealIP is deliberately not used here — it
 	// trusts X-Forwarded-For/X-Real-IP unconditionally, which is
 	// spoofable unless you know your edge proxy strips/sets those
-	// headers. Trusted-proxy-aware IP extraction belongs in the
-	// Gateway (Milestone 5), configured against the actual deployment
-	// topology, not hardcoded into the composition root.
+	// headers. Trusted-proxy-aware IP extraction needs to be
+	// configured against the actual deployment topology, not
+	// hardcoded into the composition root.
 	r.Use(slogRequestLogger(a.Logger))
 	r.Use(middleware.Recoverer)
 
 	r.Get("/healthz", a.handleLiveness)
 	r.Get("/readyz", a.handleReadiness)
+
+	limiter := gateway.NewRateLimiter(a.Redis, a.Config.RateLimitPerMinute, time.Minute)
+	gateway.Mount(r, a.Gateway, a.Agents, limiter)
 
 	return r
 }

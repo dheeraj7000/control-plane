@@ -39,6 +39,21 @@ type Config struct {
 
 	// ServiceName identifies this process in traces/metrics/logs.
 	ServiceName string
+
+	// MCPEndpoint is the MCP server's Streamable HTTP endpoint the
+	// internal/adapters/mcp client calls for tool invocations.
+	MCPEndpoint string
+	// OpenAIBaseURL defaults to the real OpenAI API; override for an
+	// OpenAI-compatible gateway or a test double.
+	OpenAIBaseURL string
+	// OpenAIAPIKey authenticates outbound OpenAI Chat Completions calls.
+	// Empty is valid (model-call steps will simply fail against the
+	// real API) — there's no local dev requirement to have a key.
+	OpenAIAPIKey string
+
+	// RateLimitPerMinute bounds requests per agent (or per source IP
+	// for unauthenticated calls) via internal/gateway.RateLimiter.
+	RateLimitPerMinute int
 }
 
 // Load reads configuration from the process environment, applying
@@ -46,14 +61,17 @@ type Config struct {
 // error if a set value is malformed (not if it's merely absent).
 func Load() (*Config, error) {
 	cfg := &Config{
-		Env:          getEnv("APP_ENV", "development"),
-		LogLevel:     getEnv("LOG_LEVEL", "info"),
-		DatabaseURL:  getEnv("DATABASE_URL", "postgres://control_plane:control_plane@localhost:5432/control_plane?sslmode=disable"),
-		RedisURL:     getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		NATSURL:      getEnv("NATS_URL", "nats://localhost:4222"),
-		OTelExporter: getEnv("OTEL_EXPORTER", "stdout"),
-		OTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
-		ServiceName:  getEnv("SERVICE_NAME", "control-plane-server"),
+		Env:           getEnv("APP_ENV", "development"),
+		LogLevel:      getEnv("LOG_LEVEL", "info"),
+		DatabaseURL:   getEnv("DATABASE_URL", "postgres://control_plane:control_plane@localhost:5432/control_plane?sslmode=disable"),
+		RedisURL:      getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		NATSURL:       getEnv("NATS_URL", "nats://localhost:4222"),
+		OTelExporter:  getEnv("OTEL_EXPORTER", "stdout"),
+		OTLPEndpoint:  getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
+		ServiceName:   getEnv("SERVICE_NAME", "control-plane-server"),
+		MCPEndpoint:   getEnv("MCP_ENDPOINT", "http://localhost:9000/mcp"),
+		OpenAIBaseURL: getEnv("OPENAI_BASE_URL", ""),
+		OpenAIAPIKey:  getEnv("OPENAI_API_KEY", ""),
 	}
 
 	port, err := getEnvInt("HTTP_PORT", 8080)
@@ -67,6 +85,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.ShutdownTimeout = time.Duration(shutdownSeconds) * time.Second
+
+	rateLimit, err := getEnvInt("RATE_LIMIT_PER_MINUTE", 120)
+	if err != nil {
+		return nil, err
+	}
+	cfg.RateLimitPerMinute = rateLimit
 
 	if err := cfg.validate(); err != nil {
 		return nil, err

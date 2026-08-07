@@ -42,3 +42,13 @@ func (r *Recorder) Record(ctx context.Context, executionID string, eventType Eve
 	}
 	return stored, nil
 }
+
+// Store exposes the underlying durable log for reads (List, for
+// replay/timeline projection) — Record is the only write path, but
+// callers legitimately need read access to the same Store without
+// this package growing a parallel Get/List surface on Recorder itself.
+func (r *Recorder) Store() Store { return r.store }
+
+// Bus exposes the underlying live fan-out for Subscribe — same
+// rationale as Store above.
+func (r *Recorder) Bus() Bus { return r.bus }

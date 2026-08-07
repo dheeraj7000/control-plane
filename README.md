@@ -96,10 +96,48 @@ Phase 1 deliverable, and Policy is specified to reference budget state
   only `internal/budget` and `internal/budget` imports no other
   internal package — the same decoupling discipline as Events/Timeline.
 
-No protocol adapters exist yet — that's Milestone 5, which also needs
-to resolve Agent identity before "register an agent" can actually work,
-and still owes tool-call idempotency and approval routing from earlier
-open questions. See
+**Milestone 5 — Gateway and protocol adapters**
+
+Every previously-isolated package gets composed for the first time, and
+the server gets its first real HTTP surface.
+
+- `internal/agent`: a new top-level package (the call made on Milestone
+  4's open question) — identity, an allowed-tools list, and a bearer
+  token whose plaintext is returned exactly once and only a salted hash
+  is ever stored.
+- `internal/adapters` (+ `mcp`, `openai`): two interfaces split by
+  shape — `Adapter` for tool calls, `ModelAdapter` for model calls. The
+  MCP client speaks real JSON-RPC 2.0 over MCP's Streamable HTTP
+  transport for `tools/call` (simplified: no handshake/discovery/SSE,
+  documented as a deliberate cut); the OpenAI client makes real HTTP
+  calls to Chat Completions. Both tested against `httptest`, never a
+  live API.
+- `internal/gateway`: `Service` is the spec's "Execution Manager" —
+  the first thing allowed to compose Workflow + Execution + Events +
+  Policy + Budget + Adapters, which is exactly why those packages were
+  kept ignorant of each other in Milestones 2-4. Its step-driver is
+  deliberately synchronous/sequential (topological order, stop on first
+  failure), not the concurrent Scheduler a production system needs —
+  this proves the wiring, not the orchestration sophistication.
+  `Mount()` wires the REST API (agents/workflows/executions +
+  timeline/events), bearer-token auth, and a Redis-backed fixed-window
+  rate limiter (fails open on a Redis error) onto a chi router.
+  `GET .../executions/{id}/ws` streams live events — with no history
+  for a late subscriber, a documented consequence of Milestone 3's Bus
+  design.
+- **Verified against a real running server**, not just unit tests:
+  registered an agent, registered a workflow, started an execution over
+  real HTTP, and watched it reach `completed` with the *exact* event
+  chain from the spec's own worked example — against real
+  Postgres/Redis/NATS.
+- Known gaps, flagged rather than hidden: agent registration is
+  unauthenticated (no control-plane-operator auth yet to gate it —
+  `internal/auth` is still unbuilt), there's no stored/configurable
+  Policy record yet (the wired `NativeEngine` has zero rules and
+  default-allows), and tool-call idempotency / approval routing remain
+  open from earlier milestones.
+
+No dashboard exists yet — that's Milestone 6. See
 [`docs/architecture.md`](docs/architecture.md) for the full milestone
 plan and the open design questions carried into them.
 

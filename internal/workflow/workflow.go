@@ -222,6 +222,20 @@ func (w Workflow) Steps() []Step {
 	return out
 }
 
+// Step returns the step with the given ID, if present. Added in
+// Milestone 5 for the orchestrator (internal/gateway.Service) to look
+// up a step's Type/Config while driving TopologicalOrder() — an O(n)
+// scan is fine at this milestone's step-count scale; revisit with an
+// index if that changes.
+func (w Workflow) Step(id string) (Step, bool) {
+	for _, s := range w.steps {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return Step{}, false
+}
+
 func copyStringMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil

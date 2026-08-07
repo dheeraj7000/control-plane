@@ -3,62 +3,214 @@ info:
   title: AI Agent Control Plane API
   version: 0.1.0-dev
   description: >
-    REST surface of the AI Agent Control Plane. This is a Milestone-1
-    skeleton: only the endpoints that exist today (health/readiness) are
-    documented. Execution, Workflow, Policy, Tool, and Model endpoints
-    are added alongside the milestones that implement them.
+    REST surface of the AI Agent Control Plane, as implemented through
+    Milestone 5. Policy/Tool Registry/Model management endpoints from
+    the spec's dashboard section are not yet built (Milestone 6).
 servers:
   - url: http://localhost:8080
+security:
+  - bearerAuth: []
 paths:
   /healthz:
     get:
       summary: Liveness probe
-      description: Always returns 200 if the process is able to serve requests.
+      security: []
       operationId: getLiveness
       responses:
         "200":
           description: Process is alive.
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
+              schema: { type: object, properties: { status: { type: string, example: ok } } }
   /readyz:
     get:
       summary: Readiness probe
-      description: >
-        Returns 200 only if Postgres, Redis, and NATS are all reachable;
-        503 otherwise, with a per-dependency breakdown.
+      description: 200 only if Postgres, Redis, and NATS are all reachable; 503 otherwise.
+      security: []
       operationId: getReadiness
       responses:
+        "200": { $ref: "#/components/responses/Readiness" }
+        "503": { $ref: "#/components/responses/Readiness" }
+
+  /agents:
+    post:
+      summary: Register an agent
+      description: >
+        The only endpoint not behind bearer auth — bootstrapping the
+        first agent would otherwise be circular. Known gap: this is
+        currently open to anyone; see docs/architecture.md.
+      security: []
+      operationId: registerAgent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, name]
+              properties:
+                id: { type: string }
+                name: { type: string }
+                allowed_tools: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: Agent registered. token is shown ONCE — it is not recoverable afterward.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent: { $ref: "#/components/schemas/Agent" }
+                  token: { type: string }
+        "409": { description: An agent with this id already exists. }
+    get:
+      summary: List agents
+      operationId: listAgents
+      responses:
         "200":
-          description: All dependencies reachable.
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/ReadinessStatus"
-        "503":
-          description: One or more dependencies unreachable.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReadinessStatus"
+              schema: { type: array, items: { $ref: "#/components/schemas/Agent" } }
+  /agents/{id}:
+    get:
+      summary: Get an agent
+      operationId: getAgent
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "404": { description: Not found. }
+
+  /workflows:
+    post:
+      summary: Register a workflow
+      description: Body is a full Workflow document; validated identically to workflow.New (unique step IDs, resolvable dependencies, acyclic graph).
+      operationId: registerWorkflow
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Workflow" }
+      responses:
+        "201": { content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "400": { description: Malformed body or failed validation. }
+        "409": { description: This (id, version) already exists — Workflows are immutable; publish a new version instead. }
+    get:
+      summary: List workflows (latest version of each)
+      operationId: listWorkflows
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Workflow" } } } } }
+  /workflows/{id}:
+    get:
+      summary: Get a workflow's latest version
+      operationId: getWorkflow
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "404": { description: Not found. }
+
+  /executions:
+    post:
+      summary: Start an execution
+      description: Returns immediately (202) once the execution is durably created; it then runs in the background. Poll GET .../{id}, or watch .../events or .../ws.
+      operationId: startExecution
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [workflow_id], properties: { workflow_id: { type: string } } }
+      responses:
+        "202": { content: { application/json: { schema: { $ref: "#/components/schemas/Execution" } } } }
+        "400": { description: Unknown workflow_id or other bad input. }
+    get:
+      summary: List executions
+      operationId: listExecutions
+      parameters:
+        - { name: workflow_id, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+      responses:
+        "200": { content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Execution" } } } } }
+  /executions/{id}:
+    get:
+      summary: Get an execution
+      operationId: getExecution
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { content: { application/json: { schema: { $ref: "#/components/schemas/Execution" } } } }
+        "404": { description: Not found. }
+  /executions/{id}/events:
+    get:
+      summary: Raw event stream, Sequence-ordered
+      operationId: getExecutionEvents
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Sequence-ordered event array. }
+  /executions/{id}/timeline:
+    get:
+      summary: Human-readable timeline projection
+      description: Deterministic over the stored event stream — calling this again after completion reproduces the same result (the spec's "replay the execution timeline", in its read-only sense).
+      operationId: getExecutionTimeline
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Ordered array of timeline entries (Label/Detail/Type/At). }
+  /executions/{id}/ws:
+    get:
+      summary: Live event stream (WebSocket)
+      description: >
+        Streams events recorded from the moment this connects onward
+        only — no replay of history for a late subscriber. Fetch
+        .../events first for full history if needed.
+      operationId: streamExecutionEvents
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "101": { description: Switching Protocols to WebSocket. }
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token returned once by POST /agents.
+  responses:
+    Readiness:
+      description: Readiness status.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, enum: [ready, not_ready] }
+              checks: { type: object, additionalProperties: { type: string } }
   schemas:
-    ReadinessStatus:
+    Agent:
       type: object
       properties:
-        status:
+        id: { type: string }
+        name: { type: string }
+        allowed_tools: { type: array, items: { type: string } }
+    Step:
+      type: object
+      required: [id, type]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [search, summarize, call_tool, review, wait, approval, model_call] }
+        depends_on: { type: array, items: { type: string } }
+        config: { type: object, additionalProperties: true }
+    Workflow:
+      type: object
+      required: [id, name, version, steps]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: integer }
+        description: { type: string }
+        steps: { type: array, items: { $ref: "#/components/schemas/Step" } }
+        metadata: { type: object, additionalProperties: { type: string } }
+        created_at: { type: string, format: date-time }
+    Execution:
+      type: object
+      properties:
+        id: { type: string }
+        workflow_id: { type: string }
+        workflow_version: { type: integer }
+        agent_id: { type: string }
+        state:
           type: string
-          enum: [ready, not_ready]
-        checks:
-          type: object
-          additionalProperties:
-            type: string
-          example:
-            postgres: ok
-            redis: ok
-            nats: ok
+          enum: [created, queued, running, waiting, paused, retrying, completed, failed, cancelled]

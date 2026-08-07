@@ -44,6 +44,7 @@ type Execution struct {
 	id              string
 	workflowID      string
 	workflowVersion int
+	agentID         string
 
 	state     State
 	createdAt time.Time
@@ -57,7 +58,7 @@ type Execution struct {
 // in — later edits to that Workflow ID (a new version) never affect
 // executions already running against an earlier one. Every step in wf
 // starts StepPending.
-func New(id string, wf workflow.Workflow) (*Execution, error) {
+func New(id string, wf workflow.Workflow, opts ...Option) (*Execution, error) {
 	if id == "" {
 		return nil, ErrEmptyID
 	}
@@ -72,7 +73,7 @@ func New(id string, wf workflow.Workflow) (*Execution, error) {
 	}
 
 	now := time.Now().UTC()
-	return &Execution{
+	e := &Execution{
 		id:              id,
 		workflowID:      wf.ID(),
 		workflowVersion: wf.Version(),
@@ -80,11 +81,31 @@ func New(id string, wf workflow.Workflow) (*Execution, error) {
 		createdAt:       now,
 		updatedAt:       now,
 		steps:           stepRuns,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e, nil
+}
+
+// Option configures optional Execution fields in New, same pattern as
+// workflow.Option.
+type Option func(*Execution)
+
+// WithAgentID records which Agent (see internal/agent) started this
+// execution. Optional and empty by default — added in Milestone 5 once
+// internal/agent existed to reference; earlier executions (and any
+// caller that doesn't have an agent context, e.g. a test) simply don't
+// set it.
+func WithAgentID(agentID string) Option {
+	return func(e *Execution) { e.agentID = agentID }
 }
 
 // ID is this execution's unique identifier.
 func (e *Execution) ID() string { return e.id }
+
+// AgentID is the Agent that started this execution, or "" if none was recorded.
+func (e *Execution) AgentID() string { return e.agentID }
 
 // WorkflowID is the Workflow template this execution was instantiated from.
 func (e *Execution) WorkflowID() string { return e.workflowID }
@@ -265,6 +286,7 @@ func (e *Execution) Clone() *Execution {
 		id:              e.id,
 		workflowID:      e.workflowID,
 		workflowVersion: e.workflowVersion,
+		agentID:         e.agentID,
 		state:           e.state,
 		createdAt:       e.createdAt,
 		updatedAt:       e.updatedAt,

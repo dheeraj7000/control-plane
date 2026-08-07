@@ -156,6 +156,20 @@ func TestSteps_ReturnsIndependentSlice(t *testing.T) {
 	}
 }
 
+func TestStep_LookupByID(t *testing.T) {
+	wf, err := workflow.New("wf-1", "Research", 1, linearSteps())
+	if err != nil {
+		t.Fatalf("New() returned error: %v", err)
+	}
+	s, ok := wf.Step("summarize")
+	if !ok || s.Type != workflow.StepTypeSummarize {
+		t.Fatalf("Step(summarize) = (%+v, %v), want the summarize step", s, ok)
+	}
+	if _, ok := wf.Step("ghost"); ok {
+		t.Fatal("Step(ghost) = true, want false for an unknown step id")
+	}
+}
+
 func TestMetadata_ReturnsIndependentMap(t *testing.T) {
 	wf, err := workflow.New("wf-1", "Research", 1, linearSteps(),
 		workflow.WithMetadata(map[string]string{"k": "v"}))
