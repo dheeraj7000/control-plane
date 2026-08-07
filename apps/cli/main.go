@@ -1,12 +1,16 @@
 // Command control-planectl is the operator CLI for the control plane.
-// It is a placeholder in Milestone 1 — real subcommands (execution
-// inspection, workflow registration, policy testing) land alongside
-// the domain milestones that back them.
+// `migrate up` landed in Milestone 7 alongside Postgres persistence —
+// real execution/workflow inspection and policy testing subcommands
+// are still owed, pending the milestones/decisions (stored policy
+// records, in particular) that would make them meaningful.
 package main
 
 import (
 	"fmt"
 	"os"
+
+	"github.com/dheeraj7000/control-plane/internal/config"
+	"github.com/dheeraj7000/control-plane/internal/storage"
 )
 
 var version = "0.1.0-dev"
@@ -21,6 +25,8 @@ func main() {
 	switch args[0] {
 	case "version":
 		fmt.Println("control-planectl " + version)
+	case "migrate":
+		runMigrate(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -30,6 +36,28 @@ func main() {
 	}
 }
 
+func runMigrate(args []string) {
+	if len(args) != 1 || args[0] != "up" {
+		fmt.Fprintln(os.Stderr, "usage: control-planectl migrate up")
+		os.Exit(1)
+	}
+
+	// Reuses internal/config so this respects the same DATABASE_URL
+	// (and its local-dev default) the server itself would use —
+	// deliberately not a separate ad hoc flag/env var.
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "control-planectl: "+err.Error())
+		os.Exit(1)
+	}
+
+	if err := storage.Migrate(cfg.DatabaseURL); err != nil {
+		fmt.Fprintln(os.Stderr, "control-planectl: migrate: "+err.Error())
+		os.Exit(1)
+	}
+	fmt.Println("migrations applied")
+}
+
 func printUsage() {
 	fmt.Println(`control-planectl - AI Agent Control Plane CLI
 
@@ -37,9 +65,10 @@ Usage:
   control-planectl <command>
 
 Commands:
-  version   Print the CLI version
-  help      Show this help text
+  version      Print the CLI version
+  migrate up   Apply pending Postgres migrations (uses DATABASE_URL, see internal/config)
+  help         Show this help text
 
-More commands (executions, workflows, policies) arrive with the
-milestones that implement those subsystems.`)
+Execution/workflow inspection and policy testing subcommands are still
+owed — see docs/architecture.md's open questions.`)
 }

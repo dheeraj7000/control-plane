@@ -1,6 +1,9 @@
 SHELL := /bin/bash
 GO ?= go
-GOLANGCI_LINT_VERSION := v1.62.2
+# v1.62.2 (this repo's original pin) doesn't support the Go 1.26
+# toolchain declared in go.mod; v2.12.2 installed via `go install` is
+# what's actually verified working (see .github/workflows/ci.yml).
+GOLANGCI_LINT_VERSION := v2.12.2
 
 .PHONY: help
 help: ## Show this help
@@ -16,8 +19,17 @@ run: ## Run the API server locally (expects `make dev-up` infra)
 	$(GO) run ./apps/server
 
 .PHONY: test
-test: ## Run unit tests with race detector
+test: ## Run unit tests with race detector (Postgres integration tests skip themselves)
 	$(GO) test -race -count=1 ./...
+
+.PHONY: test-integration
+test-integration: ## Run internal/storage's Postgres integration tests (expects `make dev-up` infra)
+	TEST_DATABASE_URL="postgres://control_plane:control_plane@localhost:55432/control_plane?sslmode=disable" \
+		$(GO) test -race -count=1 ./internal/storage/...
+
+.PHONY: migrate-up
+migrate-up: ## Apply pending migrations to DATABASE_URL (or the default local one)
+	@$(GO) run ./apps/cli migrate up
 
 .PHONY: fmt
 fmt: ## Format all Go source
@@ -30,8 +42,8 @@ vet: ## Run go vet
 .PHONY: lint
 lint: ## Run golangci-lint (installs to ./bin if missing)
 	@if [ ! -x ./bin/golangci-lint ]; then \
-		echo "installing golangci-lint $(GOLANGCI_LINT_VERSION)..."; \
-		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b ./bin $(GOLANGCI_LINT_VERSION); \
+		echo "installing golangci-lint $(GOLANGCI_LINT_VERSION) via go install..."; \
+		GOBIN=$(CURDIR)/bin $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
 	fi
 	./bin/golangci-lint run ./...
 

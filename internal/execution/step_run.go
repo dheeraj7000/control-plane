@@ -31,6 +31,19 @@ func (s StepStatus) IsTerminal() bool {
 	}
 }
 
+// isValid reports whether s is one of the six known statuses. Used by
+// Restore to catch corrupted persisted data; the live StartStep/
+// CompleteStep/etc. path never produces anything else, so this isn't
+// needed there.
+func (s StepStatus) isValid() bool {
+	switch s {
+	case StepPending, StepRunning, StepWaiting, StepCompleted, StepFailed, StepSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
 // StepRun is the per-execution runtime record for one Workflow Step.
 type StepRun struct {
 	StepID    string

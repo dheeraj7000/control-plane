@@ -224,6 +224,68 @@ func TestAllStepsCompleted(t *testing.T) {
 	}
 }
 
+func TestRestore_RoundTrip(t *testing.T) {
+	original, err := execution.New("exec-1", testWorkflow(t), execution.WithAgentID("agent-1"))
+	if err != nil {
+		t.Fatalf("New() returned error: %v", err)
+	}
+	if err := original.Transition(execution.StateQueued, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Transition(execution.StateRunning, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := original.StartStep("fetch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := original.CompleteStep("fetch"); err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := execution.Restore(execution.RestoreParams{
+		ID:              original.ID(),
+		WorkflowID:      original.WorkflowID(),
+		WorkflowVersion: original.WorkflowVersion(),
+		AgentID:         original.AgentID(),
+		State:           original.State(),
+		CreatedAt:       original.CreatedAt(),
+		UpdatedAt:       original.UpdatedAt(),
+		History:         original.History(),
+		Steps:           original.StepRuns(),
+	})
+	if err != nil {
+		t.Fatalf("Restore() returned error: %v", err)
+	}
+
+	if restored.ID() != original.ID() || restored.AgentID() != original.AgentID() ||
+		restored.State() != original.State() || !restored.CreatedAt().Equal(original.CreatedAt()) {
+		t.Fatalf("Restore() identity/state mismatch: got %+v", restored)
+	}
+	if len(restored.History()) != len(original.History()) {
+		t.Errorf("Restore() History() len = %d, want %d", len(restored.History()), len(original.History()))
+	}
+	sr, ok := restored.StepRun("fetch")
+	if !ok || sr.Status != execution.StepCompleted {
+		t.Errorf("Restore() fetch step = %+v, ok=%v, want completed", sr, ok)
+	}
+}
+
+func TestRestore_Errors(t *testing.T) {
+	if _, err := execution.Restore(execution.RestoreParams{ID: "", State: execution.StateCreated}); !errors.Is(err, execution.ErrEmptyID) {
+		t.Fatalf("Restore() error = %v, want ErrEmptyID", err)
+	}
+	if _, err := execution.Restore(execution.RestoreParams{ID: "exec-1", State: "bogus"}); !errors.Is(err, execution.ErrUnknownTargetState) {
+		t.Fatalf("Restore() error = %v, want ErrUnknownTargetState", err)
+	}
+	_, err := execution.Restore(execution.RestoreParams{
+		ID: "exec-1", State: execution.StateCreated,
+		Steps: map[string]execution.StepRun{"a": {StepID: "a", Status: "bogus"}},
+	})
+	if !errors.Is(err, execution.ErrUnknownStepStatus) {
+		t.Fatalf("Restore() error = %v, want ErrUnknownStepStatus", err)
+	}
+}
+
 func TestClone_Independence(t *testing.T) {
 	e, err := execution.New("exec-1", testWorkflow(t))
 	if err != nil {

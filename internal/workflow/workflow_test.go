@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/dheeraj7000/control-plane/internal/workflow"
 )
@@ -153,6 +154,27 @@ func TestSteps_ReturnsIndependentSlice(t *testing.T) {
 	again := wf.Steps()
 	if again[0].ID == "mutated" {
 		t.Fatal("mutating the returned slice affected the Workflow's internal state")
+	}
+}
+
+func TestRestore_PreservesCreatedAt(t *testing.T) {
+	originalTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	wf, err := workflow.Restore("wf-1", "Research", 1, linearSteps(), originalTime)
+	if err != nil {
+		t.Fatalf("Restore() returned error: %v", err)
+	}
+	if !wf.CreatedAt().Equal(originalTime) {
+		t.Errorf("CreatedAt() = %v, want %v", wf.CreatedAt(), originalTime)
+	}
+}
+
+func TestRestore_StillValidates(t *testing.T) {
+	cyclic := []workflow.Step{
+		{ID: "a", Type: workflow.StepTypeSearch, DependsOn: []string{"b"}},
+		{ID: "b", Type: workflow.StepTypeReview, DependsOn: []string{"a"}},
+	}
+	if _, err := workflow.Restore("wf-1", "n", 1, cyclic, time.Now()); !errors.Is(err, workflow.ErrCyclicDependency) {
+		t.Fatalf("Restore() error = %v, want ErrCyclicDependency", err)
 	}
 }
 

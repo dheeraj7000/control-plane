@@ -110,6 +110,24 @@ func New(id, name string, version int, steps []Step, opts ...Option) (Workflow, 
 	return wf, nil
 }
 
+// Restore reconstructs a Workflow from persisted fields (internal/
+// storage, Milestone 7), preserving the original createdAt rather than
+// stamping a fresh one the way New does — the gap flagged in this
+// package's own doc comment back in Milestone 2. It runs exactly the
+// same structural validation as New; that's a deliberate choice, not
+// an oversight — cheap defense against corrupted persisted data, not
+// just a trust-the-caller shortcut, since a Workflow is meant to be
+// impossible to hold in an invalid state regardless of where it came
+// from.
+func Restore(id, name string, version int, steps []Step, createdAt time.Time, opts ...Option) (Workflow, error) {
+	wf, err := New(id, name, version, steps, opts...)
+	if err != nil {
+		return Workflow{}, err
+	}
+	wf.createdAt = createdAt
+	return wf, nil
+}
+
 func validateSteps(steps []Step) error {
 	seen := make(map[string]struct{}, len(steps))
 	for _, s := range steps {

@@ -362,35 +362,113 @@ surface.
   PolicyEvaluated → PolicyApproved → StepCompleted → Execution
   Completed`) — over real HTTP, against real Postgres/Redis/NATS.
 
+## Milestone 7 — persistence and production hardening
+
+Reordered ahead of Milestone 6 (Dashboard) — a dashboard needs real
+data to visualize, and until this milestone every execution/workflow/
+agent vanished on process restart. `internal/storage` now implements
+every domain package's `Repository` interface (plus `events.Store`)
+against Postgres; `internal/app` wires them in as the default.
+
+- **Reconstitution APIs, the gap flagged back in Milestone 2**:
+  `workflow.Restore`, `execution.Restore`, and `agent.Restore` were
+  added so a row loaded from Postgres can become a domain object
+  without going through each package's "fresh creation" constructor
+  (which stamps `CreatedAt`/generates a token/starts at
+  `StateCreated` — none of which is right for data coming back out of
+  the database). `budget.Ledger` didn't need one: `New` +
+  `Charge(persistedUsage)` reconstructs it exactly, since a Ledger has
+  no generated/hidden fields the way Workflow (timestamp), Execution
+  (multiple derived fields), and Agent (token) do. `Restore` still runs
+  the same structural validation `New` does where that's cheap
+  (Workflow, Execution's enum checks) — defense against corrupted
+  persisted data, not just a trust-the-caller shortcut.
+- **Schema**: mostly one table per aggregate with real columns for
+  anything queried on (id/version/workflow_id/state/token_hash), JSONB
+  for the rest (steps, metadata, history, step-run map, event data).
+  `execution_sequences` is a dedicated counter table — `INSERT ... ON
+  CONFLICT DO UPDATE ... RETURNING next_seq` in one statement is the
+  standard correct pattern for a gap-free per-key counter under
+  concurrent Postgres writers, verified with an actual concurrency
+  test (50 goroutines appending to the same execution, asserting a
+  complete gapless 1..50 sequence), not just asserted.
+- **Migrations run on every boot** (`storage.Migrate`, embedded SQL
+  files via `go:embed`, `golang-migrate`) — idempotent, so this is safe
+  to call unconditionally rather than requiring a separate deploy step.
+  Also exposed as `control-planectl migrate up` for an operator (or a
+  deploy pipeline / k8s init container) to run independently. Failure
+  is logged, not fatal — same posture as the Postgres/Redis/NATS
+  connection attempts in Milestone 1: a database that's merely slow to
+  become available shouldn't crash-loop the whole process, and
+  `/readyz` already reports the underlying connectivity problem.
+- **Verified against a real restart, not just integration tests**: ran
+  the actual server, registered an agent/workflow/execution over real
+  HTTP, killed the process, started a *completely new* process, and
+  confirmed the agent (including its bearer token still authenticating
+  — the hash persisted, not just the record), workflow, execution, and
+  full event timeline were all exactly as left. This is the concrete
+  meaning of "persistence" for this milestone, not just "the repository
+  interface has a Postgres implementation."
+- **Bus stays in-memory** — only `events.Store` (durability) moved to
+  Postgres. A NATS-backed `Bus` remains explicitly deferred (see
+  Milestone 3/5 notes): nothing in this codebase yet needs
+  cross-instance live event fan-out, since there's no multi-replica
+  deployment story.
+- **Integration tests are real, not mocked**, gated behind
+  `TEST_DATABASE_URL` (skip, not fail, when unset) so `go test ./...`
+  stays hermetic by default. CI provisions a Postgres service container
+  for a dedicated integration job. Verified repeatable by running the
+  suite twice in a row against the same persistent database — the
+  first attempt at this exposed a real test-design bug (per-test
+  unique IDs guarded against collisions *within* one run but not
+  *across* runs against a non-ephemeral database), fixed with a
+  `TestMain` that truncates once per test-binary execution rather than
+  relying on a fresh database every time.
+- **A pre-existing latent bug, found and fixed while here**:
+  `golangci-lint` v1.62.2 — pinned in the Makefile and CI since
+  Milestone 1 — doesn't support the Go 1.26 toolchain `go.mod`
+  declares; only local ad hoc `go install` workarounds in this session
+  had actually been using a working version. Both the Makefile and CI
+  now pin v2.12.2 installed via `go install`/`install-mode: goinstall`,
+  consistent with what's actually been verified working throughout
+  this project.
+- **Production hardening, modestly**: request bodies are capped at 1
+  MiB (`http.MaxBytesReader`) — generous headroom for the largest
+  legitimate body (a Workflow definition) while bounding an
+  accidentally-or-maliciously huge request. Not an exhaustive hardening
+  pass — see open questions below for what's still missing.
+
 ## Open questions carried over from spec review
 
-Updated after Milestone 5 — #6 is resolved (see above), #2 is narrowed,
-the rest are unchanged:
+Updated after Milestone 7 — the rest are unchanged except where noted:
 
 1. ~~Replay semantics~~ — resolved in Milestone 3.
-2. **Tool-call idempotency** — still unresolved. `events.RetryScheduled`
-   exists and adapters now make real calls (Milestone 5), so this is no
-   longer blocked on anything else existing — it's just not designed
-   yet. A retried step can still double-execute a side-effecting tool
-   call today.
-3. **Execution-write concurrency, distributed case** — the in-memory
-   repository enforces copy-on-read/write discipline in-process (see
-   Milestone 2 above), but single-writer-per-execution *across server
-   instances* still needs a concrete mechanism (NATS subject keyed by
-   execution ID, or Postgres optimistic locking via a version column)
-   before Milestone 7's Postgres-backed `Repository` is implemented.
+2. **Tool-call idempotency** — still unresolved. Adapters make real
+   calls (Milestone 5) and events durably persist (Milestone 7), so
+   this is blocked on nothing but design effort. A retried step can
+   still double-execute a side-effecting tool call today.
+3. **Execution-write concurrency, distributed case — still open even
+   with Postgres landed.** `storage.ExecutionRepository.Update` is a
+   plain `UPDATE ... WHERE id = $1` with no version/CAS check — two
+   server instances racing to update the same execution can still
+   silently clobber each other's write. This was flagged as optional
+   in Milestone 2's `Repository` doc comment (adding a version check
+   later is backward compatible) and deliberately not added now to
+   keep this milestone's scope to "persistence exists and is correct
+   for a single writer," not "distributed-safe." Needed before running
+   more than one server instance against the same database.
 4. ~~Workflow definition format~~ — resolved in Milestone 2.
-5. **Approval routing** — who approves an `Approval` step and what
-   happens on timeout is still undefined. `StepTypeApproval` currently
-   falls through `gateway.Service.runStep`'s no-adapter-yet default
-   case (completes immediately as a no-op) — functionally fine for
-   demoing wiring, but not a real approval flow.
-6. ~~Agent identity/registration~~ — resolved in Milestone 5
-   (`internal/agent`). Full credential lifecycle (rotation, revocation,
-   a real secrets-manager/Vault/KMS integration) remains open, and
-   agent registration being unauthenticated (see above) needs
-   `internal/auth` before production use.
-7. **No stored/configurable Policy records** — `NativeEngine` is wired
-   with zero rules today; there's no API/dashboard path to add real
-   ones yet. Needed before the default-allow posture is anything but a
-   placeholder.
+5. **Approval routing** — still undefined; `StepTypeApproval` still
+   completes as a no-op in `gateway.Service.runStep`.
+6. ~~Agent identity/registration~~ — resolved in Milestone 5. Full
+   credential lifecycle (rotation, revocation, Vault/KMS) and agent
+   registration being unauthenticated remain open — both need
+   `internal/auth`, still unbuilt.
+7. **No stored/configurable Policy records** — unchanged; `NativeEngine`
+   still runs with zero rules and default-allow. This is arguably the
+   most consequential remaining gap for anything beyond local
+   development, and the natural next thing to build (a Policy
+   management API is dashboard-adjacent work — Milestone 6 territory).
+8. **NATS-backed `events.Bus`** — still in-memory only; needed once a
+   multi-replica deployment requires cross-instance live event
+   delivery. Not needed for anything this codebase does today.

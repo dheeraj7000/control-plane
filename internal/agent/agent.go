@@ -80,6 +80,39 @@ func New(agentID, name string, allowedTools []string, opts ...Option) (Agent, st
 	return a, token, nil
 }
 
+// RestoreParams carries every field needed to reconstitute an Agent
+// from persisted storage (internal/storage, Milestone 7).
+type RestoreParams struct {
+	ID           string
+	Name         string
+	AllowedTools []string
+	// TokenHash is the value already stored by a prior New/Create —
+	// Restore loads what's in the database, it does not (and cannot,
+	// by design — see New's doc comment) recover or reissue a token.
+	TokenHash string
+	Metadata  map[string]string
+	CreatedAt time.Time
+}
+
+// Restore reconstructs an Agent from p, preserving its existing
+// TokenHash rather than generating a new token the way New does.
+func Restore(p RestoreParams) (Agent, error) {
+	if p.ID == "" {
+		return Agent{}, ErrEmptyID
+	}
+	if p.Name == "" {
+		return Agent{}, ErrEmptyName
+	}
+	return Agent{
+		id:           p.ID,
+		name:         p.Name,
+		allowedTools: append([]string(nil), p.AllowedTools...),
+		tokenHash:    p.TokenHash,
+		metadata:     copyStringMap(p.Metadata),
+		createdAt:    p.CreatedAt,
+	}, nil
+}
+
 // HashToken returns the stored form of a plaintext bearer token.
 // Exported so a Repository can index Agents by it and a caller (the
 // Gateway's auth middleware) can look up an Agent by a presented token

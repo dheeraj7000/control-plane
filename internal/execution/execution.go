@@ -28,6 +28,7 @@ var (
 	ErrInvalidTransition  = errors.New("execution: transition not allowed")
 	ErrUnknownStep        = errors.New("execution: unknown step id")
 	ErrStepTerminal       = errors.New("execution: step is already terminal")
+	ErrUnknownStepStatus  = errors.New("execution: unknown step status")
 )
 
 // Transition records one state change in an Execution's history.
@@ -86,6 +87,62 @@ func New(id string, wf workflow.Workflow, opts ...Option) (*Execution, error) {
 		opt(e)
 	}
 	return e, nil
+}
+
+// RestoreParams carries every field needed to reconstitute an
+// Execution from persisted storage (internal/storage, Milestone 7)
+// without going through New's "fresh creation" semantics — New always
+// starts at StateCreated with every step Pending and stamps
+// CreatedAt/UpdatedAt to time.Now(), none of which is right for a row
+// loaded back out of Postgres. This is the reconstitution path flagged
+// as owed back in Milestone 2's docs.
+type RestoreParams struct {
+	ID              string
+	WorkflowID      string
+	WorkflowVersion int
+	AgentID         string
+	State           State
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	History         []Transition
+	Steps           map[string]StepRun
+}
+
+// Restore reconstructs an Execution from p. It trusts the caller (a
+// Repository loading a previously-persisted row) to supply internally
+// consistent data — it validates that State and every StepRun.Status
+// are known values, but does not re-derive History or re-run the
+// business rules Transition/StartStep/etc. enforce on the live path.
+func Restore(p RestoreParams) (*Execution, error) {
+	if p.ID == "" {
+		return nil, ErrEmptyID
+	}
+	if !IsValid(p.State) {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownTargetState, p.State)
+	}
+
+	steps := make(map[string]*StepRun, len(p.Steps))
+	for id, sr := range p.Steps {
+		if !sr.Status.isValid() {
+			return nil, fmt.Errorf("%w: step %s has status %q", ErrUnknownStepStatus, id, sr.Status)
+		}
+		clone := sr.clone()
+		steps[id] = &clone
+	}
+	history := make([]Transition, len(p.History))
+	copy(history, p.History)
+
+	return &Execution{
+		id:              p.ID,
+		workflowID:      p.WorkflowID,
+		workflowVersion: p.WorkflowVersion,
+		agentID:         p.AgentID,
+		state:           p.State,
+		createdAt:       p.CreatedAt,
+		updatedAt:       p.UpdatedAt,
+		history:         history,
+		steps:           steps,
+	}, nil
 }
 
 // Option configures optional Execution fields in New, same pattern as

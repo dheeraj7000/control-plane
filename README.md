@@ -137,6 +137,43 @@ the server gets its first real HTTP surface.
   default-allows), and tool-call idempotency / approval routing remain
   open from earlier milestones.
 
+**Milestone 7 — persistence and production hardening**
+
+Reordered ahead of Milestone 6 (Dashboard) — a dashboard needs real
+data, and until this milestone every execution/workflow/agent vanished
+on restart.
+
+- `internal/storage`: Postgres-backed implementations of every domain
+  `Repository` interface (plus `events.Store`), wired in as the default
+  in `internal/app`. Migrations (embedded SQL, `golang-migrate`) run
+  automatically on boot and are also exposed via `control-planectl
+  migrate up`.
+- New `Restore` constructors on `workflow`/`execution`/`agent` (the
+  reconstitution gap flagged since Milestone 2) let a Postgres row
+  become a domain object without going through each package's
+  "fresh creation" constructor.
+- Atomic per-execution event sequencing via a dedicated counter table
+  (`INSERT ... ON CONFLICT DO UPDATE ... RETURNING`) — verified with a
+  real 50-goroutine concurrency test asserting a gapless sequence, not
+  just asserted correct.
+- **Verified with an actual restart**: registered an agent/workflow/
+  execution over real HTTP, killed the server, started a *new*
+  process, and confirmed everything — including the agent's bearer
+  token still authenticating — was exactly as left.
+- Integration tests are real (gated behind `TEST_DATABASE_URL`, skip
+  when unset), with a dedicated Postgres service in CI.
+- Fixed a pre-existing latent bug found while here: `golangci-lint`
+  v1.62.2 (pinned since Milestone 1) silently doesn't support the Go
+  1.26 toolchain in `go.mod` — both the Makefile and CI now pin the
+  version actually verified working throughout this project.
+- Modest hardening: request bodies capped at 1 MiB.
+- **Bus (live event fan-out) stays in-memory** — only durability moved
+  to Postgres; a NATS-backed Bus remains deferred until something needs
+  cross-instance delivery. Execution-write concurrency across multiple
+  server instances (racing `UPDATE`s, no version/CAS check) is also
+  still open — deliberately out of scope for "persistence exists and
+  is correct for a single writer."
+
 No dashboard exists yet — that's Milestone 6. See
 [`docs/architecture.md`](docs/architecture.md) for the full milestone
 plan and the open design questions carried into them.
@@ -178,12 +215,14 @@ make docker-up
 
 | Command          | Description                                  |
 |------------------|-----------------------------------------------|
-| `make build`     | Build `server` and `control-planectl` binaries |
-| `make test`      | Run unit tests with the race detector          |
-| `make check`     | fmt + vet + test — run before committing       |
-| `make lint`      | golangci-lint (auto-installs to `./bin`)       |
-| `make dev-up`    | Start local infra only                         |
-| `make docker-up` | Build and run the full stack in containers     |
+| `make build`            | Build `server` and `control-planectl` binaries |
+| `make test`             | Run unit tests with the race detector (Postgres integration tests skip themselves) |
+| `make test-integration` | Run `internal/storage`'s real Postgres integration tests (needs `make dev-up`) |
+| `make migrate-up`       | Apply pending migrations by hand (the server also does this automatically on boot) |
+| `make check`            | fmt + vet + test — run before committing       |
+| `make lint`             | golangci-lint (auto-installs to `./bin`)       |
+| `make dev-up`           | Start local infra only                         |
+| `make docker-up`        | Build and run the full stack in containers     |
 
 ## Requirements
 

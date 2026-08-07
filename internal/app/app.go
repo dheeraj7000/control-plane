@@ -34,6 +34,7 @@ import (
 	"github.com/dheeraj7000/control-plane/internal/execution"
 	"github.com/dheeraj7000/control-plane/internal/gateway"
 	"github.com/dheeraj7000/control-plane/internal/policy"
+	"github.com/dheeraj7000/control-plane/internal/storage"
 	"github.com/dheeraj7000/control-plane/internal/telemetry"
 	"github.com/dheeraj7000/control-plane/internal/workflow"
 	pkgserver "github.com/dheeraj7000/control-plane/pkg/server"
@@ -51,9 +52,11 @@ type App struct {
 	Redis *redis.Client // lazy-connecting
 	NATS  *nats.Conn    // best-effort eager connect, see connectNATS
 
-	// Domain repositories. All in-memory today (see each package's
-	// InMemoryRepository) — Milestone 7 swaps DB/Redis-backed
-	// implementations in here without touching callers.
+	// Domain repositories — Postgres-backed as of Milestone 7
+	// (internal/storage). Each package's InMemoryRepository remains the
+	// real implementation used by every unit/orchestration test in this
+	// codebase; swapping which is wired here doesn't touch callers,
+	// exactly the point of depending on the Repository interfaces.
 	Workflows  workflow.Repository
 	Executions execution.Repository
 	Agents     agent.Repository
@@ -89,10 +92,28 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("app: init postgres pool: %w", err)
 	}
 
+	// Migrations are applied on every boot (a no-op if already
+	// up to date — see storage.Migrate) rather than requiring a
+	// separate deploy step. Non-fatal on failure, same posture as the
+	// Postgres/Redis/NATS connections above: /readyz's postgres check
+	// will already be failing if the database is unreachable, and a
+	// migration failure against a *reachable* database is a real
+	// problem worth surfacing loudly in logs rather than crash-looping
+	// the whole process over it.
+	if err := storage.Migrate(cfg.DatabaseURL); err != nil {
+		logger.Error("database migration failed, Postgres-backed repositories will likely fail at runtime",
+			slog.String("error", err.Error()))
+	}
+
 	redisClient := redis.NewClient(mustParseRedisURL(cfg.RedisURL, logger))
 
 	natsConn := connectNATS(cfg.NATSURL, logger)
 
+	// Bus stays in-memory — no NATS-backed events.Bus exists yet (see
+	// docs/architecture.md); it's only needed once something requires
+	// cross-instance live event fan-out (multiple server replicas),
+	// which this milestone doesn't add. Store is real Postgres: that's
+	// the durability this milestone is actually about.
 	a := &App{
 		Config:     cfg,
 		Logger:     logger,
@@ -100,11 +121,11 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		DB:         dbPool,
 		Redis:      redisClient,
 		NATS:       natsConn,
-		Workflows:  workflow.NewInMemoryRepository(),
-		Executions: execution.NewInMemoryRepository(),
-		Agents:     agent.NewInMemoryRepository(),
-		Budgets:    budget.NewInMemoryRepository(),
-		Events:     events.NewRecorder(events.NewInMemoryStore(), events.NewInMemoryBus()),
+		Workflows:  storage.NewWorkflowRepository(dbPool),
+		Executions: storage.NewExecutionRepository(dbPool),
+		Agents:     storage.NewAgentRepository(dbPool),
+		Budgets:    storage.NewBudgetRepository(dbPool),
+		Events:     events.NewRecorder(storage.NewEventStore(dbPool), events.NewInMemoryBus()),
 	}
 
 	// No stored/toggleable policy rules exist yet (that's Milestone
@@ -161,6 +182,7 @@ func (a *App) newRouter() *chi.Mux {
 	// hardcoded into the composition root.
 	r.Use(slogRequestLogger(a.Logger))
 	r.Use(middleware.Recoverer)
+	r.Use(limitRequestBody)
 
 	r.Get("/healthz", a.handleLiveness)
 	r.Get("/readyz", a.handleReadiness)
@@ -232,6 +254,23 @@ func connectNATS(url string, logger *slog.Logger) *nats.Conn {
 		return nil
 	}
 	return conn
+}
+
+// maxRequestBodySize caps request bodies at 1 MiB. The largest
+// legitimate body this API accepts today is a Workflow definition
+// (JSON, hand-authored or generated — realistically well under this),
+// so this is generous headroom, not a tight fit; the point is having
+// *some* bound at all, protecting against an accidentally (or
+// maliciously) huge request body tying up a connection and memory
+// decoding it. Production hardening per the NFR, not a response to any
+// observed problem.
+const maxRequestBodySize = 1 << 20 // 1 MiB
+
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func slogRequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {

@@ -27,6 +27,30 @@ jobs:
             exit 1
           fi
 
+  integration:
+    name: postgres integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: control_plane
+          POSTGRES_PASSWORD: control_plane
+          POSTGRES_DB: control_plane
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U control_plane -d control_plane"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+      - run: go test -race -count=1 ./internal/storage/...
+        env:
+          TEST_DATABASE_URL: postgres://control_plane:control_plane@localhost:5432/control_plane?sslmode=disable
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
@@ -35,9 +59,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # v1.62.2 (this repo's long-standing pin) doesn't support the Go
+      # 1.26 toolchain declared in go.mod — install-mode: goinstall
+      # builds v2.12.2 from source via `go install`, the same path that
+      # worked in local verification, sidestepping an intermittent
+      # checksum-verification failure seen from the binary-release
+      # install script for this version.
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62.2
+          version: v2.12.2
+          install-mode: goinstall
 
   compose-config:
     name: validate docker-compose

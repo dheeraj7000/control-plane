@@ -56,6 +56,43 @@ func TestNew_Errors(t *testing.T) {
 	}
 }
 
+func TestRestore_RoundTrip(t *testing.T) {
+	original, _, err := agent.New("agent-1", "Bot", []string{"tool-a"}, agent.WithMetadata(map[string]string{"k": "v"}))
+	if err != nil {
+		t.Fatalf("New() returned error: %v", err)
+	}
+
+	restored, err := agent.Restore(agent.RestoreParams{
+		ID:           original.ID(),
+		Name:         original.Name(),
+		AllowedTools: original.AllowedTools(),
+		TokenHash:    original.TokenHash(),
+		Metadata:     original.Metadata(),
+		CreatedAt:    original.CreatedAt(),
+	})
+	if err != nil {
+		t.Fatalf("Restore() returned error: %v", err)
+	}
+	if restored.TokenHash() != original.TokenHash() {
+		t.Error("Restore() did not preserve the original TokenHash")
+	}
+	if !restored.CreatedAt().Equal(original.CreatedAt()) {
+		t.Error("Restore() did not preserve the original CreatedAt")
+	}
+	if restored.Metadata()["k"] != "v" {
+		t.Error("Restore() did not preserve Metadata")
+	}
+}
+
+func TestRestore_Errors(t *testing.T) {
+	if _, err := agent.Restore(agent.RestoreParams{ID: ""}); !errors.Is(err, agent.ErrEmptyID) {
+		t.Fatalf("Restore() error = %v, want ErrEmptyID", err)
+	}
+	if _, err := agent.Restore(agent.RestoreParams{ID: "agent-1", Name: ""}); !errors.Is(err, agent.ErrEmptyName) {
+		t.Fatalf("Restore() error = %v, want ErrEmptyName", err)
+	}
+}
+
 func TestAllowedTools_ReturnsIndependentSlice(t *testing.T) {
 	a, _, err := agent.New("agent-1", "Bot", []string{"tool-a"})
 	if err != nil {
