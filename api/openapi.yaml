@@ -1,0 +1,64 @@
+openapi: 3.0.3
+info:
+  title: AI Agent Control Plane API
+  version: 0.1.0-dev
+  description: >
+    REST surface of the AI Agent Control Plane. This is a Milestone-1
+    skeleton: only the endpoints that exist today (health/readiness) are
+    documented. Execution, Workflow, Policy, Tool, and Model endpoints
+    are added alongside the milestones that implement them.
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      description: Always returns 200 if the process is able to serve requests.
+      operationId: getLiveness
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /readyz:
+    get:
+      summary: Readiness probe
+      description: >
+        Returns 200 only if Postgres, Redis, and NATS are all reachable;
+        503 otherwise, with a per-dependency breakdown.
+      operationId: getReadiness
+      responses:
+        "200":
+          description: All dependencies reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+        "503":
+          description: One or more dependencies unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+components:
+  schemas:
+    ReadinessStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            postgres: ok
+            redis: ok
+            nats: ok

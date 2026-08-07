@@ -1,0 +1,28 @@
+# Build artifacts
+/bin/
+/dist/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# Node / dashboard
+apps/dashboard/node_modules/
+apps/dashboard/.next/
+apps/dashboard/out/
+node_modules/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local tooling
+bin/golangci-lint
